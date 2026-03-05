@@ -1,5 +1,8 @@
 # claude-kanban webhook server
 
+[![CI](https://github.com/namjoo-kim-gachon/claude-kanban/actions/workflows/ci.yml/badge.svg)](https://github.com/namjoo-kim-gachon/claude-kanban/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 GitHub `issue_comment` 웹훅을 받아 `@claude` 댓글만 필터링하고, tmux 세션에 순차 실행하는 FastAPI 서버입니다.
 
 ## 주요 기능
