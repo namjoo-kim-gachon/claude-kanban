@@ -172,6 +172,9 @@ class QueueWorker:
                 project_transition["attempted"] = True
                 project_transition["in_progress"]["reason"] = f"client_error:{type(exc).__name__}"
 
+            if not self.settings.tmux_target:
+                raise RuntimeError("TMUX_TARGET is required")
+
             instruction = self._normalize_instruction(comment_body)
             tmux_payload_json = self._build_payload(
                 delivery_id=job.delivery_id,

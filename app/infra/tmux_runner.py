@@ -10,8 +10,15 @@ class TmuxRunner:
             check=True,
             shell=False,
         )
-        subprocess.run(
-            ["tmux", "send-keys", "-t", target, "Enter"],
-            check=True,
-            shell=False,
-        )
+        try:
+            subprocess.run(
+                ["tmux", "send-keys", "-t", target, "Enter"],
+                check=True,
+                shell=False,
+            )
+        except subprocess.CalledProcessError:
+            subprocess.run(
+                ["tmux", "send-keys", "-t", target, "C-m"],
+                check=True,
+                shell=False,
+            )

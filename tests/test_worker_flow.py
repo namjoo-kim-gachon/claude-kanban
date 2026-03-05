@@ -391,6 +391,35 @@ def test_worker_skips_board_move_when_tmux_fails(settings) -> None:
     assert github.move_calls == []
 
 
+def test_worker_fails_when_tmux_target_missing(settings) -> None:
+    event_queue: queue.Queue[WorkerJob] = queue.Queue()
+    github = FakeGithubClient(mention_comments=[{"id": 930, "body": "@claude go"}])
+    tmux = FakeTmuxRunner()
+
+    no_target_settings = type(settings)(
+        github_webhook_secret=settings.github_webhook_secret,
+        github_pat=settings.github_pat,
+        allowed_repo=settings.allowed_repo,
+        tmux_target="",
+        mention_keyword=settings.mention_keyword,
+        sqlite_path=settings.sqlite_path,
+        log_level=settings.log_level,
+    )
+
+    worker = QueueWorker(
+        settings=no_target_settings,
+        event_queue=event_queue,
+        store=None,
+        github_client=github,
+        tmux_runner=tmux,
+    )
+
+    event_queue.put(_job("d-no-target", 930, "@claude go"))
+    worker.process_next_once()
+
+    assert len(tmux.payloads) == 0
+
+
 def test_tmux_runner_uses_shell_false_and_send_keys_literal(monkeypatch) -> None:
     calls: list[dict[str, Any]] = []
 
@@ -405,4 +434,24 @@ def test_tmux_runner_uses_shell_false_and_send_keys_literal(monkeypatch) -> None
     assert len(calls) == 2
     assert calls[0]["args"] == ["tmux", "send-keys", "-t", "claude:0.0", "-l", "hello @claude"]
     assert calls[1]["args"] == ["tmux", "send-keys", "-t", "claude:0.0", "Enter"]
+    assert all(call["shell"] is False for call in calls)
+
+
+def test_tmux_runner_fallbacks_to_c_m_when_enter_fails(monkeypatch) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def _fake_run(args, *, check, shell):
+        calls.append({"args": args, "check": check, "shell": shell})
+        if args[-1] == "Enter":
+            raise ExceptionType(returncode=1, cmd=args)
+
+    ExceptionType = __import__("subprocess").CalledProcessError
+    monkeypatch.setattr("subprocess.run", _fake_run)
+
+    runner = TmuxRunner()
+    runner.run_payload(target="claude:0.0", payload="hello @claude")
+
+    assert len(calls) == 3
+    assert calls[1]["args"] == ["tmux", "send-keys", "-t", "claude:0.0", "Enter"]
+    assert calls[2]["args"] == ["tmux", "send-keys", "-t", "claude:0.0", "C-m"]
     assert all(call["shell"] is False for call in calls)
