@@ -1,0 +1,20 @@
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Virtual environment
+.venv/
+
+# Test/cache artifacts
+.pytest_cache/
+
+# Local environment variables
+.env
+
+# Runtime state
+state/*.db
+state/*.sqlite
+state/*.sqlite3
+
+# OS files
+.DS_Store
