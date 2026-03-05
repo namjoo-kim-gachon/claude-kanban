@@ -17,6 +17,13 @@ GitHub `issue_comment` 웹훅을 받아 `@claude` 댓글만 필터링하고, tmu
 - Python 3.11+
 - tmux
 
+## GitHub PAT 권한 가이드
+- 최소 권한: Issues (read/write)
+- GitHub Projects v2 자동 상태 이동(`In Progress`)을 사용하려면 Projects 관련 추가 권한이 필요합니다.
+- Projects 권한이 없거나 이슈가 프로젝트 아이템에 연결되어 있지 않으면, worker는 실패로 중단하지 않고 본 처리(tmux 전달)를 계속 진행합니다.
+- 이 경우 tmux payload의 `project_transition.in_progress.reason`에 실패 원인이 기록됩니다.
+- tmux payload에는 `issue_author_login`이 포함되어 있어, 후속 처리에서 `@<issue_author_login>` 형태로 멘션 답글을 작성할 수 있습니다.
+
 ## 빠른 시작
 ```bash
 python3.11 -m venv .venv

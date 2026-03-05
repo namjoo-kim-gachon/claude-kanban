@@ -50,6 +50,7 @@ def payload_factory() -> Callable[..., dict]:
                 "number": issue_number,
                 "title": issue_title,
                 "body": issue_body,
+                "user": {"login": "namjoo-kim-gachon"},
             },
             "comment": {
                 "id": comment_id,

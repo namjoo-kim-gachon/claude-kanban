@@ -19,6 +19,22 @@ class FakeGithubClient:
         _ = (repo_full_name, issue_number)
         return []
 
+    def prepare_project_transition(self, *, repo_full_name: str, issue_number: int):
+        _ = (repo_full_name, issue_number)
+        return {
+            "attempted": False,
+            "in_progress": {
+                "ok": False,
+                "reason": "not_attempted",
+                "project_item_id": None,
+                "project_id": None,
+                "status_field_id": None,
+                "in_progress_option_id": None,
+            },
+            "next_target_status": "Review",
+            "next_target_option_id": None,
+        }
+
 
 class DummyTmuxRunner:
     def run_payload(self, *, target: str, payload: str) -> None:

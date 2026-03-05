@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import queue
+import re
 import threading
 from typing import Any, Protocol
 
@@ -19,6 +21,8 @@ class GithubClientProtocol(Protocol):
     def list_issue_comments(self, *, repo_full_name: str, issue_number: int) -> list[dict[str, Any]]: ...
 
     def add_comment_reaction(self, *, repo_full_name: str, comment_id: int, content: str) -> None: ...
+
+    def prepare_project_transition(self, *, repo_full_name: str, issue_number: int) -> dict[str, Any]: ...
 
 
 class TmuxRunnerProtocol(Protocol):
@@ -42,11 +46,62 @@ class QueueWorker:
         self.tmux_runner = tmux_runner
         self._running = threading.Event()
 
-    def _build_payload(self, *, issue_title: str, issue_body: str | None, comment_body: str, is_first_mention: bool) -> str:
+    def _normalize_instruction(self, comment_body: str) -> str:
+        cleaned_body = comment_body
+        mention_keyword = self.settings.mention_keyword.strip()
+        if mention_keyword:
+            cleaned_body = re.sub(re.escape(mention_keyword), "", cleaned_body, flags=re.IGNORECASE)
+
+        normalized = re.sub(r"\s+", " ", cleaned_body).strip()
+        if not normalized:
+            normalized = "요청 내용을 확인해 처리해."
+
+        prefix = "/claude-kanban 스킬을 사용해서 처리해."
+        return f"{prefix}\n\n{normalized}"
+
+    def _default_project_transition(self) -> dict[str, Any]:
+        return {
+            "attempted": False,
+            "in_progress": {
+                "ok": False,
+                "reason": "not_attempted",
+                "project_item_id": None,
+                "project_id": None,
+                "status_field_id": None,
+                "in_progress_option_id": None,
+            },
+            "next_target_status": "Review",
+            "next_target_option_id": None,
+        }
+
+    def _build_payload(
+        self,
+        *,
+        delivery_id: str,
+        issue_title: str,
+        issue_body: str | None,
+        issue_author_login: str,
+        is_first_mention: bool,
+        repo_full_name: str,
+        issue_number: int,
+        comment_id: int,
+        project_transition: dict[str, Any],
+    ) -> str:
+        payload: dict[str, Any] = {
+            "delivery_id": delivery_id,
+            "repo_full_name": repo_full_name,
+            "issue_number": issue_number,
+            "trigger_comment_id": comment_id,
+            "is_first_mention": is_first_mention,
+            "issue_author_login": issue_author_login,
+            "project_transition": project_transition,
+        }
+
         if is_first_mention:
-            issue_body_text = issue_body or ""
-            return f"Issue Title:\n{issue_title}\n\nIssue Body:\n{issue_body_text}\n\nComment:\n{comment_body}"
-        return comment_body
+            payload["issue_title"] = issue_title
+            payload["issue_body"] = issue_body or ""
+
+        return json.dumps(payload, ensure_ascii=False)
 
     def _is_first_mention(self, *, repo_full_name: str, issue_number: int, current_comment_id: int) -> bool:
         comments = self.github_client.list_issue_comments(repo_full_name=repo_full_name, issue_number=issue_number)
@@ -85,6 +140,7 @@ class QueueWorker:
         issue_number = payload["issue"]["number"]
         issue_title = payload["issue"].get("title", "")
         issue_body = payload["issue"].get("body")
+        issue_author_login = str((payload["issue"].get("user") or {}).get("login") or "")
         comment_id = payload["comment"]["id"]
         comment_body = payload["comment"]["body"]
 
@@ -94,12 +150,31 @@ class QueueWorker:
                 issue_number=issue_number,
                 current_comment_id=comment_id,
             )
-            tmux_payload = self._build_payload(
+
+            project_transition = self._default_project_transition()
+            try:
+                project_transition = self.github_client.prepare_project_transition(
+                    repo_full_name=repo_full_name,
+                    issue_number=issue_number,
+                )
+            except Exception as exc:
+                project_transition = self._default_project_transition()
+                project_transition["attempted"] = True
+                project_transition["in_progress"]["reason"] = f"client_error:{type(exc).__name__}"
+
+            instruction = self._normalize_instruction(comment_body)
+            tmux_payload_json = self._build_payload(
+                delivery_id=job.delivery_id,
                 issue_title=issue_title,
                 issue_body=issue_body,
-                comment_body=comment_body,
+                issue_author_login=issue_author_login,
                 is_first_mention=is_first,
+                repo_full_name=repo_full_name,
+                issue_number=issue_number,
+                comment_id=comment_id,
+                project_transition=project_transition,
             )
+            tmux_payload = f"{instruction}\n\n{tmux_payload_json}"
             self.tmux_runner.run_payload(target=self.settings.tmux_target, payload=tmux_payload)
 
             if self.store is not None:
