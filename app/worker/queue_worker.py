@@ -24,6 +24,15 @@ class GithubClientProtocol(Protocol):
 
     def prepare_project_transition(self, *, repo_full_name: str, issue_number: int) -> dict[str, Any]: ...
 
+    def try_move_issue_to_in_progress(
+        self,
+        *,
+        project_id: str,
+        project_item_id: str,
+        status_field_id: str,
+        in_progress_option_id: str,
+    ) -> dict[str, Any]: ...
+
 
 class TmuxRunnerProtocol(Protocol):
     def run_payload(self, *, target: str, payload: str) -> None: ...
@@ -157,6 +166,7 @@ class QueueWorker:
                     repo_full_name=repo_full_name,
                     issue_number=issue_number,
                 )
+                project_transition["attempted"] = True
             except Exception as exc:
                 project_transition = self._default_project_transition()
                 project_transition["attempted"] = True
@@ -177,27 +187,28 @@ class QueueWorker:
             tmux_payload = f"{instruction}\n\n{tmux_payload_json}"
             self.tmux_runner.run_payload(target=self.settings.tmux_target, payload=tmux_payload)
 
+            in_progress = project_transition.get("in_progress")
+            if isinstance(in_progress, dict):
+                project_id = in_progress.get("project_id")
+                project_item_id = in_progress.get("project_item_id")
+                status_field_id = in_progress.get("status_field_id")
+                in_progress_option_id = in_progress.get("in_progress_option_id")
+
+                if project_id and project_item_id and status_field_id and in_progress_option_id:
+                    try:
+                        self.github_client.try_move_issue_to_in_progress(
+                            project_id=str(project_id),
+                            project_item_id=str(project_item_id),
+                            status_field_id=str(status_field_id),
+                            in_progress_option_id=str(in_progress_option_id),
+                        )
+                    except Exception:
+                        pass
+
             if self.store is not None:
                 self.store.update_status(delivery_id=job.delivery_id, status="processed")
-
-            try:
-                self.github_client.add_comment_reaction(
-                    repo_full_name=repo_full_name,
-                    comment_id=comment_id,
-                    content="rocket",
-                )
-            except Exception:
-                pass
         except Exception:
             if self.store is not None:
                 self.store.update_status(delivery_id=job.delivery_id, status="failed")
-            try:
-                self.github_client.add_comment_reaction(
-                    repo_full_name=repo_full_name,
-                    comment_id=comment_id,
-                    content="confused",
-                )
-            except Exception:
-                pass
         finally:
             self.event_queue.task_done()

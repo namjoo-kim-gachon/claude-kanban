@@ -17,6 +17,8 @@ class FakeGithubClient:
         fail_reaction: bool = False,
         transition_result: dict[str, Any] | None = None,
         transition_error: Exception | None = None,
+        move_result: dict[str, Any] | None = None,
+        move_error: Exception | None = None,
     ) -> None:
         self.mention_comments = mention_comments
         self.fail_reaction = fail_reaction
@@ -25,17 +27,20 @@ class FakeGithubClient:
             "attempted": True,
             "in_progress": {
                 "ok": False,
-                "reason": "not_configured",
-                "project_item_id": None,
-                "project_id": None,
-                "status_field_id": None,
-                "in_progress_option_id": None,
+                "reason": "ready",
+                "project_item_id": "ITEM_1",
+                "project_id": "PROJ_1",
+                "status_field_id": "FIELD_1",
+                "in_progress_option_id": "OPT_IN_PROGRESS",
             },
             "next_target_status": "Review",
-            "next_target_option_id": None,
+            "next_target_option_id": "OPT_REVIEW",
         }
         self.transition_error = transition_error
         self.transition_calls: list[tuple[str, int]] = []
+        self.move_result = move_result or {"ok": True, "reason": "updated"}
+        self.move_error = move_error
+        self.move_calls: list[tuple[str, str, str, str]] = []
 
     def list_issue_comments(self, *, repo_full_name: str, issue_number: int) -> list[dict[str, Any]]:
         _ = (repo_full_name, issue_number)
@@ -52,6 +57,19 @@ class FakeGithubClient:
         if self.transition_error is not None:
             raise self.transition_error
         return self.transition_result
+
+    def try_move_issue_to_in_progress(
+        self,
+        *,
+        project_id: str,
+        project_item_id: str,
+        status_field_id: str,
+        in_progress_option_id: str,
+    ) -> dict[str, Any]:
+        self.move_calls.append((project_id, project_item_id, status_field_id, in_progress_option_id))
+        if self.move_error is not None:
+            raise self.move_error
+        return self.move_result
 
 
 class FakeTmuxRunner:
@@ -75,22 +93,6 @@ def _job(delivery_id: str, comment_id: int, comment_body: str) -> WorkerJob:
     return WorkerJob(delivery_id=delivery_id, payload=payload)
 
 
-def _transition_ok() -> dict[str, Any]:
-    return {
-        "attempted": True,
-        "in_progress": {
-            "ok": True,
-            "reason": "updated",
-            "project_item_id": "ITEM_1",
-            "project_id": "PROJ_1",
-            "status_field_id": "FIELD_1",
-            "in_progress_option_id": "OPT_IN_PROGRESS",
-        },
-        "next_target_status": "Review",
-        "next_target_option_id": "OPT_REVIEW",
-    }
-
-
 def _decode_tmux_payload(payload_text: str) -> tuple[str, dict[str, Any]]:
     instruction, payload_json = payload_text.rsplit("\n\n", 1)
     return instruction, json.loads(payload_json)
@@ -98,7 +100,7 @@ def _decode_tmux_payload(payload_text: str) -> tuple[str, dict[str, Any]]:
 
 def test_worker_processes_jobs_in_fifo_order(settings) -> None:
     event_queue: queue.Queue[WorkerJob] = queue.Queue()
-    github = FakeGithubClient(mention_comments=[{"id": 100, "body": "@claude first"}], transition_result=_transition_ok())
+    github = FakeGithubClient(mention_comments=[{"id": 100, "body": "@claude first"}])
     tmux = FakeTmuxRunner()
 
     worker = QueueWorker(
@@ -124,7 +126,7 @@ def test_worker_processes_jobs_in_fifo_order(settings) -> None:
 
 def test_worker_sends_first_comment_payload_with_issue_context(settings) -> None:
     event_queue: queue.Queue[WorkerJob] = queue.Queue()
-    github = FakeGithubClient(mention_comments=[{"id": 101, "body": "@claude first"}], transition_result=_transition_ok())
+    github = FakeGithubClient(mention_comments=[{"id": 101, "body": "@claude first"}])
     tmux = FakeTmuxRunner()
 
     worker = QueueWorker(
@@ -156,8 +158,7 @@ def test_worker_sends_followup_comment_payload_without_issue_context(settings) -
         mention_comments=[
             {"id": 101, "body": "@claude first"},
             {"id": 202, "body": "@claude followup"},
-        ],
-        transition_result=_transition_ok(),
+        ]
     )
     tmux = FakeTmuxRunner()
 
@@ -172,7 +173,7 @@ def test_worker_sends_followup_comment_payload_without_issue_context(settings) -
     event_queue.put(_job("d-follow", 202, "@claude followup"))
     worker.process_next_once()
 
-    instruction, payload = _decode_tmux_payload(tmux.payloads[0])
+    _, payload = _decode_tmux_payload(tmux.payloads[0])
     assert payload["is_first_mention"] is False
     assert "issue_title" not in payload
     assert "issue_body" not in payload
@@ -181,7 +182,7 @@ def test_worker_sends_followup_comment_payload_without_issue_context(settings) -
 
 def test_worker_normalizes_instruction_and_removes_mentions(settings) -> None:
     event_queue: queue.Queue[WorkerJob] = queue.Queue()
-    github = FakeGithubClient(mention_comments=[{"id": 711, "body": "@ClAuDe   run this"}], transition_result=_transition_ok())
+    github = FakeGithubClient(mention_comments=[{"id": 711, "body": "@ClAuDe   run this"}])
     tmux = FakeTmuxRunner()
 
     worker = QueueWorker(
@@ -195,14 +196,14 @@ def test_worker_normalizes_instruction_and_removes_mentions(settings) -> None:
     event_queue.put(_job("d-normalize", 711, "  @ClAuDe   run\nthis  "))
     worker.process_next_once()
 
-    instruction, payload = _decode_tmux_payload(tmux.payloads[0])
+    instruction, _ = _decode_tmux_payload(tmux.payloads[0])
     assert instruction.startswith("/claude-kanban 스킬을 사용해서 처리해.")
     assert "@claude" not in instruction.lower()
 
 
-def test_worker_marks_success_reaction(settings) -> None:
+def test_worker_does_not_add_success_reaction(settings) -> None:
     event_queue: queue.Queue[WorkerJob] = queue.Queue()
-    github = FakeGithubClient(mention_comments=[{"id": 300, "body": "@claude go"}], transition_result=_transition_ok())
+    github = FakeGithubClient(mention_comments=[{"id": 300, "body": "@claude go"}])
     tmux = FakeTmuxRunner()
 
     worker = QueueWorker(
@@ -216,12 +217,12 @@ def test_worker_marks_success_reaction(settings) -> None:
     event_queue.put(_job("d-success", 300, "@claude go"))
     worker.process_next_once()
 
-    assert (300, "rocket") in github.reactions
+    assert github.reactions == []
 
 
-def test_worker_marks_failure_reaction_on_tmux_error(settings) -> None:
+def test_worker_does_not_add_failure_reaction_on_tmux_error(settings) -> None:
     event_queue: queue.Queue[WorkerJob] = queue.Queue()
-    github = FakeGithubClient(mention_comments=[{"id": 400, "body": "@claude go"}], transition_result=_transition_ok())
+    github = FakeGithubClient(mention_comments=[{"id": 400, "body": "@claude go"}])
     tmux = FakeTmuxRunner(should_fail=True)
 
     worker = QueueWorker(
@@ -235,13 +236,13 @@ def test_worker_marks_failure_reaction_on_tmux_error(settings) -> None:
     event_queue.put(_job("d-fail", 400, "@claude go"))
     worker.process_next_once()
 
-    assert (400, "confused") in github.reactions
+    assert github.reactions == []
 
 
 def test_worker_updates_store_processed_status(settings) -> None:
     event_queue: queue.Queue[WorkerJob] = queue.Queue()
     store = SqliteDeliveryStore(settings.sqlite_path)
-    github = FakeGithubClient(mention_comments=[{"id": 500, "body": "@claude go"}], transition_result=_transition_ok())
+    github = FakeGithubClient(mention_comments=[{"id": 500, "body": "@claude go"}])
     tmux = FakeTmuxRunner()
 
     store.insert_delivery_if_new(
@@ -271,7 +272,7 @@ def test_worker_updates_store_processed_status(settings) -> None:
 def test_worker_updates_store_failed_status(settings) -> None:
     event_queue: queue.Queue[WorkerJob] = queue.Queue()
     store = SqliteDeliveryStore(settings.sqlite_path)
-    github = FakeGithubClient(mention_comments=[{"id": 600, "body": "@claude go"}], transition_result=_transition_ok())
+    github = FakeGithubClient(mention_comments=[{"id": 600, "body": "@claude go"}])
     tmux = FakeTmuxRunner(should_fail=True)
 
     store.insert_delivery_if_new(
@@ -298,9 +299,9 @@ def test_worker_updates_store_failed_status(settings) -> None:
     assert row["status"] == "failed"
 
 
-def test_worker_includes_project_transition_success_metadata(settings) -> None:
+def test_worker_includes_project_transition_metadata(settings) -> None:
     event_queue: queue.Queue[WorkerJob] = queue.Queue()
-    github = FakeGithubClient(mention_comments=[{"id": 801, "body": "@claude go"}], transition_result=_transition_ok())
+    github = FakeGithubClient(mention_comments=[{"id": 801, "body": "@claude go"}])
     tmux = FakeTmuxRunner()
 
     worker = QueueWorker(
@@ -314,10 +315,9 @@ def test_worker_includes_project_transition_success_metadata(settings) -> None:
     event_queue.put(_job("d-transition-ok", 801, "@claude go"))
     worker.process_next_once()
 
-    instruction, payload = _decode_tmux_payload(tmux.payloads[0])
+    _, payload = _decode_tmux_payload(tmux.payloads[0])
     transition = payload["project_transition"]
     assert transition["attempted"] is True
-    assert transition["in_progress"]["ok"] is True
     assert transition["in_progress"]["project_item_id"] == "ITEM_1"
     assert transition["next_target_status"] == "Review"
     assert transition["next_target_option_id"] == "OPT_REVIEW"
@@ -344,12 +344,51 @@ def test_worker_soft_fails_project_transition_and_continues_tmux(settings) -> No
     worker.process_next_once()
 
     assert len(tmux.payloads) == 1
-    instruction, payload = _decode_tmux_payload(tmux.payloads[0])
+    _, payload = _decode_tmux_payload(tmux.payloads[0])
     transition = payload["project_transition"]
     assert transition["attempted"] is True
     assert transition["in_progress"]["ok"] is False
     assert transition["in_progress"]["reason"] == "client_error:RuntimeError"
-    assert (901, "rocket") in github.reactions
+    assert github.reactions == []
+
+
+def test_worker_moves_board_after_tmux_send(settings) -> None:
+    event_queue: queue.Queue[WorkerJob] = queue.Queue()
+    github = FakeGithubClient(mention_comments=[{"id": 910, "body": "@claude go"}])
+    tmux = FakeTmuxRunner()
+
+    worker = QueueWorker(
+        settings=settings,
+        event_queue=event_queue,
+        store=None,
+        github_client=github,
+        tmux_runner=tmux,
+    )
+
+    event_queue.put(_job("d-move-order", 910, "@claude go"))
+    worker.process_next_once()
+
+    assert len(tmux.payloads) == 1
+    assert github.move_calls == [("PROJ_1", "ITEM_1", "FIELD_1", "OPT_IN_PROGRESS")]
+
+
+def test_worker_skips_board_move_when_tmux_fails(settings) -> None:
+    event_queue: queue.Queue[WorkerJob] = queue.Queue()
+    github = FakeGithubClient(mention_comments=[{"id": 920, "body": "@claude go"}])
+    tmux = FakeTmuxRunner(should_fail=True)
+
+    worker = QueueWorker(
+        settings=settings,
+        event_queue=event_queue,
+        store=None,
+        github_client=github,
+        tmux_runner=tmux,
+    )
+
+    event_queue.put(_job("d-move-skip", 920, "@claude go"))
+    worker.process_next_once()
+
+    assert github.move_calls == []
 
 
 def test_tmux_runner_uses_shell_false_and_send_keys_literal(monkeypatch) -> None:

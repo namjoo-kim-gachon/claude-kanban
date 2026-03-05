@@ -56,7 +56,7 @@ class GithubClient:
 
     def prepare_project_transition(self, *, repo_full_name: str, issue_number: int) -> dict[str, Any]:
         result: dict[str, Any] = {
-            "attempted": True,
+            "attempted": False,
             "in_progress": {
                 "ok": False,
                 "reason": "unknown",
@@ -199,6 +199,17 @@ class GithubClient:
             result["in_progress"]["reason"] = "status_field_id_missing"
             return result
 
+        result["in_progress"]["reason"] = "ready"
+        return result
+
+    def try_move_issue_to_in_progress(
+        self,
+        *,
+        project_id: str,
+        project_item_id: str,
+        status_field_id: str,
+        in_progress_option_id: str,
+    ) -> dict[str, Any]:
         mutation = """
         mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
           updateProjectV2ItemFieldValue(
@@ -227,9 +238,6 @@ class GithubClient:
                 },
             )
         except Exception as exc:
-            result["in_progress"]["reason"] = f"graphql_update_failed:{type(exc).__name__}"
-            return result
+            return {"ok": False, "reason": f"graphql_update_failed:{type(exc).__name__}"}
 
-        result["in_progress"]["ok"] = True
-        result["in_progress"]["reason"] = "updated"
-        return result
+        return {"ok": True, "reason": "updated"}

@@ -10,7 +10,7 @@ GitHub `issue_comment` 웹훅을 받아 `@claude` 댓글만 필터링하고, tmu
 - `issue_comment` + `action=created` + repo/권한/멘션 필터
 - `X-GitHub-Delivery` 기반 SQLite idempotency
 - 전역 FIFO 큐 + 단일 worker 순차 처리
-- reaction 피드백: `eyes` → `rocket` / `confused`
+- reaction 피드백: 수신 직후 `eyes` 1회
 - tmux 안전 실행: `shell=False`, `send-keys -l`, `Enter`
 
 ## 요구사항

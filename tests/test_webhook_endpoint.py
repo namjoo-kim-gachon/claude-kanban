@@ -35,6 +35,17 @@ class FakeGithubClient:
             "next_target_option_id": None,
         }
 
+    def try_move_issue_to_in_progress(
+        self,
+        *,
+        project_id: str,
+        project_item_id: str,
+        status_field_id: str,
+        in_progress_option_id: str,
+    ):
+        _ = (project_id, project_item_id, status_field_id, in_progress_option_id)
+        return {"ok": True, "reason": "updated"}
+
 
 class DummyTmuxRunner:
     def run_payload(self, *, target: str, payload: str) -> None:
