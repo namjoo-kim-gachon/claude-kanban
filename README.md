@@ -39,6 +39,12 @@ source .venv/bin/activate
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8765 --env-file .env --app-dir .
 ```
 
+서버 중지:
+```bash
+# 실행 터미널에서
+Ctrl+C
+```
+
 ## 테스트
 ```bash
 source .venv/bin/activate
