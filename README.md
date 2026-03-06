@@ -97,6 +97,35 @@ Projects 권한이 없어도 요청 전달 자체는 계속 진행됩니다.
 - 댓글 멘션이 매핑에 없으면 worker가 요청을 실행하지 않습니다.
 - 실제 tmux pane 이름(세션:윈도우.패인)과 정확히 맞춰야 합니다.
 
+### 3) `gh api graphql` 쿼리 파싱 오류 (`Expected VAR_SIGN`)
+
+Projects 상태 전환 스크립트에서 GraphQL mutation을 `-f query='mutation(...)'` 형태의 **인라인 문자열**로 넘기면 셸/이스케이프 환경에 따라 파싱 오류가 자주 발생할 수 있습니다.
+
+권장 방식은 **HEREDOC 고정**입니다.
+
+```bash
+gh api graphql \
+  -f query="$(cat <<'EOF'
+mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+  updateProjectV2ItemFieldValue(
+    input: {
+      projectId: $projectId
+      itemId: $itemId
+      fieldId: $fieldId
+      value: { singleSelectOptionId: $optionId }
+    }
+  ) {
+    projectV2Item { id }
+  }
+}
+EOF
+)" \
+  -f projectId="$PROJECT_ID" \
+  -f itemId="$PROJECT_ITEM_ID" \
+  -f fieldId="$STATUS_FIELD_ID" \
+  -f optionId="$REVIEW_OPTION_ID"
+```
+
 ---
 
 ## 서버 실행

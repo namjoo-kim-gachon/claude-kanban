@@ -148,21 +148,29 @@ Run only when all IDs exist:
 - `REVIEW_OPTION_ID` (= `next_target_option_id`)
 
 ```bash
-gh api graphql -f query='mutation($projectId:ID!,$itemId:ID!,$fieldId:ID!,$optionId:String!){
-  updateProjectV2ItemFieldValue(input:{
-    projectId:$projectId,
-    itemId:$itemId,
-    fieldId:$fieldId,
-    value:{singleSelectOptionId:$optionId}
-  }) {
+gh api graphql \
+  -f query="$(cat <<'EOF'
+mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+  updateProjectV2ItemFieldValue(
+    input: {
+      projectId: $projectId
+      itemId: $itemId
+      fieldId: $fieldId
+      value: { singleSelectOptionId: $optionId }
+    }
+  ) {
     projectV2Item { id }
   }
-}' \
--f projectId="$PROJECT_ID" \
--f itemId="$PROJECT_ITEM_ID" \
--f fieldId="$STATUS_FIELD_ID" \
--f optionId="$REVIEW_OPTION_ID"
+}
+EOF
+)" \
+  -f projectId="$PROJECT_ID" \
+  -f itemId="$PROJECT_ITEM_ID" \
+  -f fieldId="$STATUS_FIELD_ID" \
+  -f optionId="$REVIEW_OPTION_ID"
 ```
+
+GraphQL mutation은 **반드시 HEREDOC**으로 전달한다. 인라인 쿼리 문자열(`-f query='mutation(...)'`)은 셸/이스케이프 환경에 따라 `Expected VAR_SIGN` 같은 파싱 오류가 반복될 수 있으므로 사용하지 않는다.
 
 If this step fails, do not rollback instruction work. Report failure in final summary and in the issue comment.
 

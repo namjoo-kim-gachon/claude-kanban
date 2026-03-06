@@ -122,11 +122,17 @@ DB 파일 예시: `./state/webhook.db`
 ### 필요 API
 - 이슈 댓글 조회(첫 `@claude` 판별)
 - 댓글 reaction 추가
+- Projects v2 상태 전환(GraphQL mutation)
 
 ### 인증
 - Fine-grained PAT
 - 대상 repo: `namjookim/claude-kanban`
 - 필요한 권한: Issues 읽기 + reaction 추가 가능한 권한
+- Projects 전환 시 추가 권한: `project`, `read:project`
+
+### GraphQL 호출 안정성 원칙
+- `gh api graphql` 호출 시 mutation은 인라인 문자열(`-f query='mutation(...)'`) 대신 **HEREDOC**으로 전달한다.
+- 인라인 방식은 셸/이스케이프 차이로 `Expected VAR_SIGN` 파싱 오류를 유발할 수 있다.
 
 ---
 
