@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import pytest
+
+from app.config import _parse_mention_target_map
 from app.domain.webhook_rules import (
     ACCEPTED_ASSOCIATIONS,
     is_allowed_issue_comment,
@@ -23,25 +26,11 @@ def test_filter_rejects_non_created_action(payload_factory) -> None:
 
     decision = is_allowed_issue_comment(
         payload=payload,
-        allowed_repo="namjookim/claude-kanban",
-        mention_keyword="@claude",
+        mention_keywords=["@claude"],
     )
 
     assert decision.allowed is False
     assert decision.reason == "action_not_created"
-
-
-def test_filter_rejects_unallowed_repo(payload_factory) -> None:
-    payload = payload_factory(repo_full_name="other/repo")
-
-    decision = is_allowed_issue_comment(
-        payload=payload,
-        allowed_repo="namjookim/claude-kanban",
-        mention_keyword="@claude",
-    )
-
-    assert decision.allowed is False
-    assert decision.reason == "repo_not_allowed"
 
 
 def test_filter_rejects_unallowed_author_association(payload_factory) -> None:
@@ -49,8 +38,7 @@ def test_filter_rejects_unallowed_author_association(payload_factory) -> None:
 
     decision = is_allowed_issue_comment(
         payload=payload,
-        allowed_repo="namjookim/claude-kanban",
-        mention_keyword="@claude",
+        mention_keywords=["@claude"],
     )
 
     assert decision.allowed is False
@@ -62,8 +50,19 @@ def test_filter_rejects_missing_mention(payload_factory) -> None:
 
     decision = is_allowed_issue_comment(
         payload=payload,
-        allowed_repo="namjookim/claude-kanban",
-        mention_keyword="@claude",
+        mention_keywords=["@claude"],
+    )
+
+    assert decision.allowed is False
+    assert decision.reason == "mention_not_found"
+
+
+def test_filter_rejects_when_mention_keywords_empty(payload_factory) -> None:
+    payload = payload_factory(comment_body="@claude run this")
+
+    decision = is_allowed_issue_comment(
+        payload=payload,
+        mention_keywords=[],
     )
 
     assert decision.allowed is False
@@ -75,13 +74,31 @@ def test_filter_accepts_valid_payload(payload_factory) -> None:
 
     decision = is_allowed_issue_comment(
         payload=payload,
-        allowed_repo="namjookim/claude-kanban",
-        mention_keyword="@claude",
+        mention_keywords=["@claude"],
     )
 
     assert decision.allowed is True
     assert decision.reason == "accepted"
     assert decision.comment_id == payload["comment"]["id"]
+
+
+def test_filter_accepts_when_any_configured_mention_found(payload_factory) -> None:
+    payload = payload_factory(author_association="OWNER", comment_body="Please check @ㅋㅋ1")
+
+    decision = is_allowed_issue_comment(
+        payload=payload,
+        mention_keywords=["@claude", "@ㅋㅋ", "@ㅋㅋ1"],
+    )
+
+    assert decision.allowed is True
+    assert decision.reason == "accepted"
+
+
+def test_parse_mention_target_map_warns_invalid_entries() -> None:
+    with pytest.warns(RuntimeWarning, match="Invalid MENTION_TO_TMUX entries ignored"):
+        parsed = _parse_mention_target_map("@claude=0:0.0,invalid,@ops=0:0.1,=bad,@x=")
+
+    assert parsed == {"@claude": "0:0.0", "@ops": "0:0.1"}
 
 
 def test_accepted_associations_are_fixed_set() -> None:

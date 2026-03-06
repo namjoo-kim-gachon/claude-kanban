@@ -149,7 +149,7 @@ def test_worker_sends_first_comment_payload_with_issue_context(settings) -> None
     assert payload["issue_title"] == "Issue title"
     assert payload["issue_body"] == "Issue body"
     assert payload["project_transition"]["next_target_status"] == "Review"
-    assert instruction.startswith("/claude-kanban 스킬을 사용해서 처리해.")
+    assert instruction.startswith("/claude-kanban")
 
 
 def test_worker_sends_followup_comment_payload_without_issue_context(settings) -> None:
@@ -197,7 +197,7 @@ def test_worker_normalizes_instruction_and_removes_mentions(settings) -> None:
     worker.process_next_once()
 
     instruction, _ = _decode_tmux_payload(tmux.payloads[0])
-    assert instruction.startswith("/claude-kanban 스킬을 사용해서 처리해.")
+    assert instruction.startswith("/claude-kanban")
     assert "@claude" not in instruction.lower()
 
 
@@ -372,7 +372,7 @@ def test_worker_moves_board_after_tmux_send(settings) -> None:
     assert github.move_calls == [("PROJ_1", "ITEM_1", "FIELD_1", "OPT_IN_PROGRESS")]
 
 
-def test_worker_skips_board_move_when_tmux_fails(settings) -> None:
+def test_worker_moves_board_even_when_tmux_fails(settings) -> None:
     event_queue: queue.Queue[WorkerJob] = queue.Queue()
     github = FakeGithubClient(mention_comments=[{"id": 920, "body": "@claude go"}])
     tmux = FakeTmuxRunner(should_fail=True)
@@ -388,26 +388,24 @@ def test_worker_skips_board_move_when_tmux_fails(settings) -> None:
     event_queue.put(_job("d-move-skip", 920, "@claude go"))
     worker.process_next_once()
 
-    assert github.move_calls == []
+    assert github.move_calls == [("PROJ_1", "ITEM_1", "FIELD_1", "OPT_IN_PROGRESS")]
 
 
-def test_worker_fails_when_tmux_target_missing(settings) -> None:
+def test_worker_fails_when_mention_mapping_not_found(settings) -> None:
     event_queue: queue.Queue[WorkerJob] = queue.Queue()
     github = FakeGithubClient(mention_comments=[{"id": 930, "body": "@claude go"}])
     tmux = FakeTmuxRunner()
 
-    no_target_settings = type(settings)(
+    no_mapping_settings = type(settings)(
         github_webhook_secret=settings.github_webhook_secret,
         github_pat=settings.github_pat,
-        allowed_repo=settings.allowed_repo,
-        tmux_target="",
-        mention_keyword=settings.mention_keyword,
+        mention_to_tmux={"@other": "claude:0.1"},
         sqlite_path=settings.sqlite_path,
         log_level=settings.log_level,
     )
 
     worker = QueueWorker(
-        settings=no_target_settings,
+        settings=no_mapping_settings,
         event_queue=event_queue,
         store=None,
         github_client=github,
@@ -420,38 +418,160 @@ def test_worker_fails_when_tmux_target_missing(settings) -> None:
     assert len(tmux.payloads) == 0
 
 
-def test_tmux_runner_uses_shell_false_and_send_keys_literal(monkeypatch) -> None:
+def test_worker_routes_by_mention_mapping(settings) -> None:
+    event_queue: queue.Queue[WorkerJob] = queue.Queue()
+    github = FakeGithubClient(mention_comments=[{"id": 940, "body": "@ㅋㅋ run"}])
+
+    class CaptureTmuxRunner:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str]] = []
+
+        def run_payload(self, *, target: str, payload: str) -> None:
+            self.calls.append((target, payload))
+
+    tmux = CaptureTmuxRunner()
+
+    mapped_settings = type(settings)(
+        github_webhook_secret=settings.github_webhook_secret,
+        github_pat=settings.github_pat,
+        mention_to_tmux={"@ㅋㅋ": "0:0.0", "@ㅋㅋ1": "0:1.0"},
+        sqlite_path=settings.sqlite_path,
+        log_level=settings.log_level,
+    )
+
+    worker = QueueWorker(
+        settings=mapped_settings,
+        event_queue=event_queue,
+        store=None,
+        github_client=github,
+        tmux_runner=tmux,
+    )
+
+    event_queue.put(_job("d-map-mention", 940, "@ㅋㅋ 이 기능 추가해줘"))
+    worker.process_next_once()
+
+    assert len(tmux.calls) == 1
+    assert tmux.calls[0][0] == "0:0.0"
+    instruction, _ = _decode_tmux_payload(tmux.calls[0][1])
+    assert "@ㅋㅋ" not in instruction
+
+
+def test_tmux_runner_uses_preflight_load_paste_enter_sequence(monkeypatch) -> None:
     calls: list[dict[str, Any]] = []
 
-    def _fake_run(args, *, check, shell):
-        calls.append({"args": args, "check": check, "shell": shell})
+    class _Result:
+        def __init__(self, stdout: str = "") -> None:
+            self.stdout = stdout
+
+    def _fake_run(args, **kwargs):
+        calls.append({"args": args, **kwargs})
+        if args[:3] == ["tmux", "display-message", "-p"]:
+            return _Result(stdout="0:0\n")
+        return _Result()
 
     monkeypatch.setattr("subprocess.run", _fake_run)
 
     runner = TmuxRunner()
     runner.run_payload(target="claude:0.0", payload="hello @claude")
 
-    assert len(calls) == 2
-    assert calls[0]["args"] == ["tmux", "send-keys", "-t", "claude:0.0", "-l", "hello @claude"]
-    assert calls[1]["args"] == ["tmux", "send-keys", "-t", "claude:0.0", "Enter"]
+    assert len(calls) == 4
+    assert calls[0]["args"] == ["tmux", "display-message", "-p", "-t", "claude:0.0", "#{pane_dead}:#{pane_in_mode}"]
+    assert calls[0]["capture_output"] is True
+    assert calls[0]["text"] is True
+
+    assert calls[1]["args"][:4] == ["tmux", "load-buffer", "-b", calls[1]["args"][3]]
+    assert calls[1]["args"][4:] == ["-"]
+    assert calls[1]["input"] == "hello @claude"
+    assert calls[1]["text"] is True
+
+    assert calls[2]["args"] == ["tmux", "paste-buffer", "-d", "-b", calls[1]["args"][3], "-t", "claude:0.0"]
+    assert calls[3]["args"] == ["tmux", "send-keys", "-t", "claude:0.0", "C-m"]
     assert all(call["shell"] is False for call in calls)
 
 
-def test_tmux_runner_fallbacks_to_c_m_when_enter_fails(monkeypatch) -> None:
+def test_tmux_runner_keeps_payload_unchanged_before_load_buffer(monkeypatch) -> None:
     calls: list[dict[str, Any]] = []
 
-    def _fake_run(args, *, check, shell):
-        calls.append({"args": args, "check": check, "shell": shell})
-        if args[-1] == "Enter":
-            raise ExceptionType(returncode=1, cmd=args)
+    class _Result:
+        def __init__(self, stdout: str = "") -> None:
+            self.stdout = stdout
 
-    ExceptionType = __import__("subprocess").CalledProcessError
+    def _fake_run(args, **kwargs):
+        calls.append({"args": args, **kwargs})
+        if args[:3] == ["tmux", "display-message", "-p"]:
+            return _Result(stdout="0:0\n")
+        return _Result()
+
+    monkeypatch.setattr("subprocess.run", _fake_run)
+
+    payload = "line1\n\n{\"k\":1}"
+    runner = TmuxRunner()
+    runner.run_payload(target="claude:0.0", payload=payload)
+
+    assert len(calls) == 4
+    assert calls[1]["input"] == payload
+    assert calls[2]["args"][0] == "tmux"
+    assert calls[3]["args"][-1] == "C-m"
+    assert all(call["shell"] is False for call in calls)
+
+
+def test_tmux_runner_cancels_copy_mode_before_paste(monkeypatch) -> None:
+    calls: list[dict[str, Any]] = []
+
+    class _Result:
+        def __init__(self, stdout: str = "") -> None:
+            self.stdout = stdout
+
+    def _fake_run(args, **kwargs):
+        calls.append({"args": args, **kwargs})
+        if args[:3] == ["tmux", "display-message", "-p"]:
+            return _Result(stdout="0:1\n")
+        return _Result()
+
     monkeypatch.setattr("subprocess.run", _fake_run)
 
     runner = TmuxRunner()
-    runner.run_payload(target="claude:0.0", payload="hello @claude")
+    runner.run_payload(target="claude:0.0", payload="hello")
 
-    assert len(calls) == 3
-    assert calls[1]["args"] == ["tmux", "send-keys", "-t", "claude:0.0", "Enter"]
-    assert calls[2]["args"] == ["tmux", "send-keys", "-t", "claude:0.0", "C-m"]
-    assert all(call["shell"] is False for call in calls)
+    assert len(calls) == 5
+    assert calls[1]["args"] == ["tmux", "send-keys", "-t", "claude:0.0", "-X", "cancel"]
+    assert calls[-1]["args"] == ["tmux", "send-keys", "-t", "claude:0.0", "C-m"]
+
+
+def test_tmux_runner_raises_meaningful_error_on_preflight_failure(monkeypatch) -> None:
+    def _fake_run(args, **kwargs):
+        raise __import__("subprocess").CalledProcessError(returncode=1, cmd=args)
+
+    monkeypatch.setattr("subprocess.run", _fake_run)
+
+    runner = TmuxRunner()
+    try:
+        runner.run_payload(target="claude:0.0", payload="hello")
+        assert False, "expected RuntimeError"
+    except RuntimeError as exc:
+        assert "tmux preflight failed" in str(exc)
+
+
+def test_tmux_runner_raises_meaningful_error_on_paste_failure(monkeypatch) -> None:
+    calls = {"count": 0}
+
+    class _Result:
+        def __init__(self, stdout: str = "") -> None:
+            self.stdout = stdout
+
+    def _fake_run(args, **kwargs):
+        calls["count"] += 1
+        if args[:3] == ["tmux", "display-message", "-p"]:
+            return _Result(stdout="0:0\n")
+        if args[:2] == ["tmux", "paste-buffer"]:
+            raise __import__("subprocess").CalledProcessError(returncode=1, cmd=args)
+        return _Result()
+
+    monkeypatch.setattr("subprocess.run", _fake_run)
+
+    runner = TmuxRunner()
+    try:
+        runner.run_payload(target="claude:0.0", payload="hello")
+        assert False, "expected RuntimeError"
+    except RuntimeError as exc:
+        assert "tmux paste-buffer failed" in str(exc)

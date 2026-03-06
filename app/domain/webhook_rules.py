@@ -31,14 +31,10 @@ def should_handle_event(*, event_name: str | None) -> bool:
     return event_name == "issue_comment"
 
 
-def is_allowed_issue_comment(*, payload: dict[str, Any], allowed_repo: str, mention_keyword: str) -> FilterDecision:
+def is_allowed_issue_comment(*, payload: dict[str, Any], mention_keywords: list[str]) -> FilterDecision:
     action = payload.get("action")
     if action != "created":
         return FilterDecision(allowed=False, reason="action_not_created")
-
-    repo_full_name = (payload.get("repository") or {}).get("full_name")
-    if repo_full_name != allowed_repo:
-        return FilterDecision(allowed=False, reason="repo_not_allowed")
 
     comment = payload.get("comment") or {}
     association = comment.get("author_association")
@@ -46,7 +42,8 @@ def is_allowed_issue_comment(*, payload: dict[str, Any], allowed_repo: str, ment
         return FilterDecision(allowed=False, reason="author_not_allowed")
 
     comment_body = comment.get("body") or ""
-    if mention_keyword.lower() not in comment_body.lower():
+    normalized_body = comment_body.lower()
+    if not any(keyword.lower() in normalized_body for keyword in mention_keywords if keyword.strip()):
         return FilterDecision(allowed=False, reason="mention_not_found")
 
     comment_id = comment.get("id")

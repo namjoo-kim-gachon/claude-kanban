@@ -163,9 +163,7 @@ DB 파일 예시: `./state/webhook.db`
 
 - `GITHUB_WEBHOOK_SECRET` (필수)
 - `GITHUB_PAT` (필수)
-- `ALLOWED_REPO=namjookim/claude-kanban`
-- `TMUX_TARGET=claude:0.0`
-- `MENTION_KEYWORD=@claude`
+- `MENTION_TO_TMUX=@claude=claude:0.0,@ops=claude:0.1`
 - `SQLITE_PATH=./state/webhook.db`
 - `LOG_LEVEL=INFO`
 

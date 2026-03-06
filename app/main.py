@@ -93,8 +93,7 @@ def create_app(
         payload = _extract_payload(raw_body)
         decision = is_allowed_issue_comment(
             payload=payload,
-            allowed_repo=resolved_settings.allowed_repo,
-            mention_keyword=resolved_settings.mention_keyword,
+            mention_keywords=resolved_settings.mention_keywords,
         )
         if not decision.allowed:
             return JSONResponse(

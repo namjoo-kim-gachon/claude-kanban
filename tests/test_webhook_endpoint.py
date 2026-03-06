@@ -183,10 +183,49 @@ def test_webhook_accepts_and_enqueues_job(
     assert event_queue.qsize() == 1
     assert github.reactions == [("namjookim/claude-kanban", 777, "eyes")]
 
-    row = store.get_delivery("delivery-accepted")
-    assert row is not None
-    assert row["status"] == "accepted"
 
+def test_webhook_ignores_when_mention_mapping_is_empty(
+    settings,
+    payload_factory,
+    encode_payload,
+    signed_headers_factory,
+    test_secret,
+) -> None:
+    event_queue: queue.Queue = queue.Queue()
+    github = FakeGithubClient()
+    store = SqliteDeliveryStore(settings.sqlite_path)
+
+    no_mapping_settings = type(settings)(
+        github_webhook_secret=settings.github_webhook_secret,
+        github_pat=settings.github_pat,
+        mention_to_tmux={},
+        sqlite_path=settings.sqlite_path,
+        log_level=settings.log_level,
+    )
+
+    app = create_app(
+        settings=no_mapping_settings,
+        store=store,
+        event_queue=event_queue,
+        github_client=github,
+        tmux_runner=DummyTmuxRunner(),
+    )
+    client = TestClient(app)
+
+    payload = payload_factory(comment_id=778, comment_body="@claude run this")
+    raw_body = encode_payload(payload)
+    headers = signed_headers_factory(
+        secret=test_secret,
+        raw_body=raw_body,
+        delivery_id="delivery-no-mapping",
+    )
+
+    response = client.post("/webhook/github", content=raw_body, headers=headers)
+
+    assert response.status_code == 202
+    assert response.json() == {"result": "ignored_filter", "reason": "mention_not_found"}
+    assert event_queue.qsize() == 0
+    assert github.reactions == []
 
 def test_webhook_returns_200_for_duplicate_delivery(
     settings,

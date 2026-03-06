@@ -20,9 +20,7 @@ def settings(tmp_path, test_secret: str) -> Settings:
     return Settings(
         github_webhook_secret=test_secret,
         github_pat="test-pat",
-        allowed_repo="namjookim/claude-kanban",
-        tmux_target="claude:0.0",
-        mention_keyword="@claude",
+        mention_to_tmux={"@claude": "claude:0.0"},
         sqlite_path=str(tmp_path / "webhook.db"),
         log_level="INFO",
     )

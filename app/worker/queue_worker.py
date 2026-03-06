@@ -57,15 +57,15 @@ class QueueWorker:
 
     def _normalize_instruction(self, comment_body: str) -> str:
         cleaned_body = comment_body
-        mention_keyword = self.settings.mention_keyword.strip()
-        if mention_keyword:
-            cleaned_body = re.sub(re.escape(mention_keyword), "", cleaned_body, flags=re.IGNORECASE)
+        for mention_keyword in self.settings.mention_keywords:
+            if mention_keyword:
+                cleaned_body = re.sub(re.escape(mention_keyword), "", cleaned_body, flags=re.IGNORECASE)
 
         normalized = re.sub(r"\s+", " ", cleaned_body).strip()
         if not normalized:
             normalized = "요청 내용을 확인해 처리해."
 
-        prefix = "/claude-kanban 스킬을 사용해서 처리해."
+        prefix = "/claude-kanban"
         return f"{prefix}\n\n{normalized}"
 
     def _default_project_transition(self) -> dict[str, Any]:
@@ -114,8 +114,12 @@ class QueueWorker:
 
     def _is_first_mention(self, *, repo_full_name: str, issue_number: int, current_comment_id: int) -> bool:
         comments = self.github_client.list_issue_comments(repo_full_name=repo_full_name, issue_number=issue_number)
+        mention_keywords = [k.lower() for k in self.settings.mention_keywords if k.strip()]
         mention_comments = [
-            c for c in comments if isinstance(c.get("body"), str) and self.settings.mention_keyword.lower() in c["body"].lower()
+            c
+            for c in comments
+            if isinstance(c.get("body"), str)
+            and any(keyword in c["body"].lower() for keyword in mention_keywords)
         ]
         mention_comments.sort(key=lambda c: c.get("id", 0))
         if not mention_comments:
@@ -172,23 +176,9 @@ class QueueWorker:
                 project_transition["attempted"] = True
                 project_transition["in_progress"]["reason"] = f"client_error:{type(exc).__name__}"
 
-            if not self.settings.tmux_target:
-                raise RuntimeError("TMUX_TARGET is required")
-
-            instruction = self._normalize_instruction(comment_body)
-            tmux_payload_json = self._build_payload(
-                delivery_id=job.delivery_id,
-                issue_title=issue_title,
-                issue_body=issue_body,
-                issue_author_login=issue_author_login,
-                is_first_mention=is_first,
-                repo_full_name=repo_full_name,
-                issue_number=issue_number,
-                comment_id=comment_id,
-                project_transition=project_transition,
-            )
-            tmux_payload = f"{instruction}\n\n{tmux_payload_json}"
-            self.tmux_runner.run_payload(target=self.settings.tmux_target, payload=tmux_payload)
+            resolved_tmux_target = self.settings.resolve_tmux_target(comment_body)
+            if not resolved_tmux_target:
+                raise RuntimeError("MENTION_TO_TMUX mapping is required")
 
             in_progress = project_transition.get("in_progress")
             if isinstance(in_progress, dict):
@@ -207,6 +197,21 @@ class QueueWorker:
                         )
                     except Exception:
                         pass
+
+            instruction = self._normalize_instruction(comment_body)
+            tmux_payload_json = self._build_payload(
+                delivery_id=job.delivery_id,
+                issue_title=issue_title,
+                issue_body=issue_body,
+                issue_author_login=issue_author_login,
+                is_first_mention=is_first,
+                repo_full_name=repo_full_name,
+                issue_number=issue_number,
+                comment_id=comment_id,
+                project_transition=project_transition,
+            )
+            tmux_payload = f"{instruction}\n\n{tmux_payload_json}"
+            self.tmux_runner.run_payload(target=resolved_tmux_target, payload=tmux_payload)
 
             if self.store is not None:
                 self.store.update_status(delivery_id=job.delivery_id, status="processed")
