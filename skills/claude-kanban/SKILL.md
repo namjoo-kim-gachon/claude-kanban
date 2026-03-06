@@ -10,36 +10,37 @@ Process incoming tmux content in this format:
 2) blank line
 3) JSON payload (bottom)
 
-Execute the instruction first, then always report back to the issue with a mention, then always attempt to move project status to Review.
+Execute the instruction first, then always attempt to move project status to Review, then always report back to the issue with a mention.
 
 ## Workflow
 
 1. Parse tmux input into `instruction` and `payload_json`.
 2. Validate required payload fields needed for issue comment (`repo_full_name`, `issue_number`, `issue_author_login`).
 3. Execute the instruction task.
-4. **Always attempt** issue comment via `gh issue comment` with `@issue_author_login` mention and concise summary.
-5. **Always attempt** Review transition via `gh api graphql` when transition IDs exist.
+4. **Always attempt** Review transition via `gh api graphql` when transition IDs exist.
+5. **Always attempt** issue comment via `gh issue comment` with `@issue_author_login` mention and concise summary.
 6. Return a final status summary including explicit evidence fields.
 
 ## Non-negotiable post-actions
 
 After instruction execution (success/failure/blocked), the agent must execute post-actions in this order:
-1) issue comment attempt
-2) review transition attempt (or explicit skipped with reason)
+1) review transition attempt (or explicit skipped with reason)
+2) issue comment attempt
 
 This rule also applies when:
 - instruction execution fails
 - user clarification is required
 - user asks to stop/exit mid-task
 
-If clarification is needed, post clarification comment first, mark `blocked_on_clarification`, and set:
-- `review_transition_result: skipped (waiting_for_user_clarification)`
+If clarification is needed, attempt Review transition first when IDs are available, then post clarification comment, mark `blocked_on_clarification`, and set:
+- `review_transition_result: done|failed` (based on transition attempt)
+- `review_transition_result: skipped (waiting_for_user_clarification)` only when transition IDs are missing or transition cannot be attempted before clarification for explicit reasons
 
-**Failure handling rule:** Even when instruction execution fails (for example push/auth failure), you must still (a) post a failure summary comment to the issue and (b) attempt Review transition with available payload IDs.
+**Failure handling rule:** Even when instruction execution fails (for example push/auth failure), you must still (a) attempt Review transition with available payload IDs and (b) post a failure summary comment to the issue.
 
-**Clarification handling rule:** If instruction is ambiguous and requires user choice/confirmation, you must post a clarification comment via `gh issue comment` immediately before (or right after) asking the CLI question, then mark current state as `blocked_on_clarification`.
+**Clarification handling rule:** If instruction is ambiguous and requires user choice/confirmation, you must attempt Review transition first when IDs are available, then post a clarification comment via `gh issue comment` immediately before (or right after) asking the CLI question, then mark current state as `blocked_on_clarification`.
 
-**Hard ordering rule:** Never ask the user clarification question before the clarification comment attempt has been made.
+**Hard ordering rule:** Never ask the user clarification question before Review transition attempt and clarification comment attempt have been made.
 
 **Exit/interrupt rule:** Even if the instruction asks to finish quickly (e.g. `/exit`) or conversation appears to end, you must still perform post-actions first and include evidence.
 
@@ -192,8 +193,8 @@ If clarification comment posting fails, final summary must include:
 - Prefer `gh` for all GitHub interactions.
 - Keep operations non-destructive: do not close issue/PR unless explicitly requested.
 - Do not push code unless explicitly requested.
-- If instruction is ambiguous, post clarification comment first (or immediately after), then ask a concise clarification question.
-- During clarification wait state, do not attempt Review transition; report as `skipped: waiting_for_user_clarification`.
+- If instruction is ambiguous, attempt Review transition first when IDs are available, then post clarification comment (before or immediately after the CLI question).
+- During clarification wait state, keep the ordering rule: transition attempted first when possible; otherwise report `skipped: waiting_for_user_clarification` with explicit reason.
 
 ## Final response checklist
 
