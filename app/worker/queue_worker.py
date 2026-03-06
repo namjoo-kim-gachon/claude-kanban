@@ -57,7 +57,8 @@ class QueueWorker:
 
     def _normalize_instruction(self, comment_body: str) -> str:
         cleaned_body = comment_body
-        for mention_keyword in self.settings.mention_keywords:
+        mention_keywords = sorted(self.settings.mention_keywords, key=len, reverse=True)
+        for mention_keyword in mention_keywords:
             if mention_keyword:
                 cleaned_body = re.sub(re.escape(mention_keyword), "", cleaned_body, flags=re.IGNORECASE)
 

@@ -10,18 +10,38 @@ Process incoming tmux content in this format:
 2) blank line
 3) JSON payload (bottom)
 
-Execute the instruction first, then report back to the issue with a mention, then move project status to Review.
+Execute the instruction first, then always report back to the issue with a mention, then always attempt to move project status to Review.
 
 ## Workflow
 
 1. Parse tmux input into `instruction` and `payload_json`.
-2. Validate required payload fields.
+2. Validate required payload fields needed for issue comment (`repo_full_name`, `issue_number`, `issue_author_login`).
 3. Execute the instruction task.
-4. Post issue comment via `gh issue comment` with `@issue_author_login` mention and concise summary.
-5. Move project item to Review via `gh api graphql` if transition identifiers exist.
-6. Return a final status summary including comment URL (if available) and project transition result.
+4. **Always attempt** issue comment via `gh issue comment` with `@issue_author_login` mention and concise summary.
+5. **Always attempt** Review transition via `gh api graphql` when transition IDs exist.
+6. Return a final status summary including explicit evidence fields.
+
+## Non-negotiable post-actions
+
+After instruction execution (success/failure/blocked), the agent must execute post-actions in this order:
+1) issue comment attempt
+2) review transition attempt (or explicit skipped with reason)
+
+This rule also applies when:
+- instruction execution fails
+- user clarification is required
+- user asks to stop/exit mid-task
+
+If clarification is needed, post clarification comment first, mark `blocked_on_clarification`, and set:
+- `review_transition_result: skipped (waiting_for_user_clarification)`
 
 **Failure handling rule:** Even when instruction execution fails (for example push/auth failure), you must still (a) post a failure summary comment to the issue and (b) attempt Review transition with available payload IDs.
+
+**Clarification handling rule:** If instruction is ambiguous and requires user choice/confirmation, you must post a clarification comment via `gh issue comment` immediately before (or right after) asking the CLI question, then mark current state as `blocked_on_clarification`.
+
+**Hard ordering rule:** Never ask the user clarification question before the clarification comment attempt has been made.
+
+**Exit/interrupt rule:** Even if the instruction asks to finish quickly (e.g. `/exit`) or conversation appears to end, you must still perform post-actions first and include evidence.
 
 ## Mandatory completion gate (hard rule)
 
@@ -29,6 +49,7 @@ You must not declare completion until both post-actions have been attempted and 
 
 Required evidence to include in final output:
 - `issue_comment_url`: URL returned by `gh issue comment` (or explicit failure reason)
+- `clarification_comment_url`: URL returned by clarification `gh issue comment` when clarification was needed (or explicit failure reason + attempted command)
 - `review_transition_result`: returned `projectV2Item.id` from GraphQL (or explicit failure reason)
 
 If either step is skipped due to missing IDs or permissions, final output must explicitly state:
@@ -69,7 +90,13 @@ Always include:
 - result summary (success/failure)
 - project move result (done/skipped/failed)
 
-Example:
+Clarification comment must include:
+- `@{issue_author_login}` mention at top
+- 1-2 line summary of what is ambiguous
+- required choice options or confirmation question
+- explicit status: `blocked_on_clarification`
+
+Completion/failure example:
 
 ```bash
 gh issue comment "$ISSUE_NUMBER" \
@@ -85,6 +112,32 @@ gh issue comment "$ISSUE_NUMBER" \
 EOF
 )"
 ```
+
+Clarification example:
+
+```bash
+gh issue comment "$ISSUE_NUMBER" \
+  --repo "$REPO" \
+  --body "$(cat <<'EOF'
+@$ISSUE_AUTHOR_LOGIN 확인이 필요한 사항이 있어 작업을 잠시 멈췄습니다.
+
+## 모호한 지점
+- 배포 대상 브랜치가 `main`인지 `release/*`인지 지시가 불명확합니다.
+
+## 필요한 확인
+- 아래 중 하나를 선택해주세요:
+  1) main 배포
+  2) release 브랜치 배포
+
+## 현재 상태
+- blocked_on_clarification
+EOF
+)"
+```
+
+Clarification comment also requires evidence capture in final output:
+- `clarification_comment_url` on success
+- explicit failure reason + attempted `gh issue comment` command on failure
 
 ## Move project item to Review
 
@@ -120,12 +173,19 @@ If instruction execution fails, comment body must include:
 - key error summary
 - current local status (e.g. commit created but push failed)
 
+If clarification comment posting fails, final summary must include:
+- exact failure reason
+- attempted `gh issue comment` command
+- current state remains `blocked_on_clarification`
+- no automatic retry loop; retry only after user confirmation
+
 ## Execution policy
 
 - Prefer `gh` for all GitHub interactions.
 - Keep operations non-destructive: do not close issue/PR unless explicitly requested.
 - Do not push code unless explicitly requested.
-- If instruction is ambiguous, ask a concise clarification question before acting.
+- If instruction is ambiguous, post clarification comment first (or immediately after), then ask a concise clarification question.
+- During clarification wait state, do not attempt Review transition; report as `skipped: waiting_for_user_clarification`.
 
 ## Final response checklist
 
@@ -133,5 +193,7 @@ If instruction execution fails, comment body must include:
 - Issue author mentioned in comment (or reason why skipped)
 - Review transition attempted (or reason why skipped)
 - `issue_comment_url` included (or explicit failure reason)
+- If clarification occurred: `clarification_comment_url` included (or explicit failure reason + attempted command)
 - `review_transition_result` included (or explicit failure reason)
+- For clarification wait state: `review_transition_result: skipped (waiting_for_user_clarification)` allowed
 - Brief final status summary returned

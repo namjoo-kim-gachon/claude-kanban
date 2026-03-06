@@ -52,7 +52,8 @@ class Settings:
 
     def resolve_tmux_target(self, comment_body: str) -> str:
         normalized = comment_body.lower()
-        for mention, target in (self.mention_to_tmux or {}).items():
+        mentions = sorted((self.mention_to_tmux or {}).items(), key=lambda item: len(item[0]), reverse=True)
+        for mention, target in mentions:
             if mention.lower() in normalized:
                 return target
         return ""
