@@ -106,6 +106,8 @@ Projects 상태 전환까지 쓰려면 추가:
 
 ## 서버 실행
 
+일반적으로 claude CLI 와 본 서버 모두 tmux 안에서 돌리는 것을 가정하고 있음.
+
 ```bash
 source .venv/bin/activate
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8765 --env-file .env --app-dir .
