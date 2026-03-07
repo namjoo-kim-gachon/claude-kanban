@@ -621,7 +621,7 @@ def test_worker_adds_rename_with_session_name_pattern(settings) -> None:
         tmux_runner=tmux,
     )
 
-    event_queue.put(
+    worker.event_queue.put(
         WorkerJob(
             delivery_id="d-rename-pattern",
             event_name="issue_comment",
@@ -644,10 +644,9 @@ def test_worker_adds_rename_with_session_name_pattern(settings) -> None:
     assert rename_line.startswith("/rename ")
 
     session_name = rename_line.removeprefix("/rename ")
-    assert re.fullmatch(r"[a-z0-9-]+-\d{8}T\d{6}Z", session_name)
-    assert session_name.startswith("fix-oauth-now-")
+    assert re.fullmatch(r"Issue 42 - Fix OAuth 로그인!! NOW - \d{8}T\d{6}Z", session_name)
 
-    timestamp_text = session_name.rsplit("-", 1)[1]
+    timestamp_text = session_name.rsplit(" - ", 1)[1]
     parsed = datetime.strptime(timestamp_text, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
     assert parsed.tzinfo == timezone.utc
 

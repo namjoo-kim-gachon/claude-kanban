@@ -90,17 +90,13 @@ class QueueWorker:
         }
 
     def _build_issue_session_name(self, *, issue_title: str, issue_number: int) -> str:
-        normalized = unicodedata.normalize("NFKD", issue_title)
-        ascii_only = normalized.encode("ascii", "ignore").decode("ascii").lower()
-        slug = re.sub(r"[^a-z0-9]+", "-", ascii_only)
-        slug = re.sub(r"-+", "-", slug).strip("-")
-        if not slug:
-            slug = f"issue-{issue_number}"
-        slug = slug[:48].rstrip("-")
-        if not slug:
-            slug = f"issue-{issue_number}"
+        normalized_title = unicodedata.normalize("NFKC", issue_title)
+        normalized_title = re.sub(r"\s+", " ", normalized_title).strip()
+        if not normalized_title:
+            normalized_title = f"Issue {issue_number}"
+
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        return f"{slug}-{timestamp}"
+        return f"Issue {issue_number} - {normalized_title} - {timestamp}"
 
     def _build_payload(
         self,
