@@ -27,6 +27,10 @@ After instruction execution (success/failure/blocked), the agent must execute po
 1) review transition attempt (or explicit skipped with reason)
 2) issue comment attempt
 
+**Strict timing rule:** Run these two post-actions immediately after instruction handling reaches a terminal state (`done`, `failed`, `blocked_on_clarification`).
+- Do not postpone post-actions for extra cleanup tasks (e.g. teammate shutdown retries, local housekeeping, waiting loops).
+- If cleanup remains after post-actions, report it as follow-up state in the issue comment body.
+
 This rule also applies when:
 - instruction execution fails
 - user clarification is required
@@ -47,6 +51,11 @@ If clarification is needed, attempt Review transition first when IDs are availab
 ## Mandatory completion gate (hard rule)
 
 You must not declare completion until both post-actions have been attempted and evidence is captured.
+
+Terminal state examples (must trigger post-actions immediately):
+- instruction goal achieved, but optional cleanup remains
+- helper agent/team shutdown pending or flaky
+- additional retries are possible but not required for the primary instruction outcome
 
 Required evidence to include in final output:
 - `issue_comment_url`: URL returned by `gh issue comment` (or explicit failure reason)
@@ -218,6 +227,16 @@ If clarification comment posting fails, final summary must include:
 - Do not push code unless explicitly requested.
 - If instruction is ambiguous, attempt Review transition first when IDs are available, then post clarification comment (before or immediately after the CLI question).
 - During clarification wait state, keep the ordering rule: transition attempted first when possible; otherwise report `skipped: waiting_for_user_clarification` with explicit reason.
+- Team/agent lifecycle work (spawn/shutdown/delete) must be treated as optional operational cleanup unless explicitly part of the user's instruction outcome. Do not delay mandatory post-actions for this cleanup.
+
+## Pre-post-action self-check (must run mentally before finishing)
+
+- Did instruction reach a terminal state (`done`/`failed`/`blocked_on_clarification`)?
+- If yes, did I run **Review transition attempt first** (or explicitly mark skipped with reason)?
+- Did I run `gh issue comment` with `@issue_author_login` mention?
+- Did I capture `issue_comment_url` and `review_transition_result` evidence values?
+- If clarification path, did I also capture `clarification_comment_url` (or failure reason + attempted command)?
+- Am I delaying post-actions for optional cleanup (team shutdown/retry loops)? If yes, stop and execute post-actions now.
 
 ## Final response checklist
 
