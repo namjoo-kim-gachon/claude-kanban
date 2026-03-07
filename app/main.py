@@ -10,7 +10,12 @@ from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 
 from app.config import Settings
-from app.domain.webhook_rules import is_allowed_issue_comment, should_handle_event, verify_github_signature
+from app.domain.webhook_rules import (
+    is_allowed_issue_comment,
+    is_allowed_issue_state_event,
+    should_handle_event,
+    verify_github_signature,
+)
 from app.infra.github_client import GithubClient
 from app.infra.sqlite_store import SqliteDeliveryStore
 from app.infra.tmux_runner import TmuxRunner
@@ -91,15 +96,23 @@ def create_app(
             return JSONResponse(status_code=status.HTTP_202_ACCEPTED, content={"result": "ignored_event"})
 
         payload = _extract_payload(raw_body)
-        decision = is_allowed_issue_comment(
-            payload=payload,
-            mention_keywords=resolved_settings.mention_keywords,
-        )
-        if not decision.allowed:
-            return JSONResponse(
-                status_code=status.HTTP_202_ACCEPTED,
-                content={"result": "ignored_filter", "reason": decision.reason},
+        if event_name == "issue_comment":
+            decision = is_allowed_issue_comment(
+                payload=payload,
+                mention_keywords=resolved_settings.mention_keywords,
             )
+            if not decision.allowed:
+                return JSONResponse(
+                    status_code=status.HTTP_202_ACCEPTED,
+                    content={"result": "ignored_filter", "reason": decision.reason},
+                )
+        else:
+            decision = is_allowed_issue_state_event(payload=payload)
+            if not decision.allowed:
+                return JSONResponse(
+                    status_code=status.HTTP_202_ACCEPTED,
+                    content={"result": "ignored_filter", "reason": decision.reason},
+                )
 
         delivery_id = request.headers.get("X-GitHub-Delivery")
         if not delivery_id:
@@ -116,17 +129,18 @@ def create_app(
         if not inserted:
             return JSONResponse(status_code=status.HTTP_200_OK, content={"result": "duplicate"})
 
-        comment_id = int(payload["comment"]["id"])
-        try:
-            resolved_github_client.add_comment_reaction(
-                repo_full_name=repo_full_name,
-                comment_id=comment_id,
-                content="eyes",
-            )
-        except Exception:
-            pass
+        if event_name == "issue_comment":
+            comment_id = int(payload["comment"]["id"])
+            try:
+                resolved_github_client.add_comment_reaction(
+                    repo_full_name=repo_full_name,
+                    comment_id=comment_id,
+                    content="eyes",
+                )
+            except Exception:
+                pass
 
-        resolved_queue.put(WorkerJob(delivery_id=delivery_id, payload=payload))
+        resolved_queue.put(WorkerJob(delivery_id=delivery_id, event_name=event_name or "issue_comment", payload=payload))
         return JSONResponse(status_code=status.HTTP_202_ACCEPTED, content={"result": "accepted"})
 
     return app

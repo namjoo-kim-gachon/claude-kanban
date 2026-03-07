@@ -81,7 +81,7 @@ LOG_LEVEL=INFO
 
 ## 처음 설정할 때 많이 막히는 지점
 
-### 1) PAT 권한
+### 1) GitHub PAT 권한
 
 개인 계정일 경우 Fine grained token 으로는 Projects 권한 설정할 수 없음.
 

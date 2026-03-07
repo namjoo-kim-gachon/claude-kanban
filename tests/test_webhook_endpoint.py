@@ -51,6 +51,9 @@ class DummyTmuxRunner:
     def run_payload(self, *, target: str, payload: str) -> None:
         _ = (target, payload)
 
+    def wait_for_text(self, *, target: str, expected_text: str, timeout_seconds: float = 8.0) -> None:
+        _ = (target, expected_text, timeout_seconds)
+
 
 def test_webhook_returns_401_on_invalid_signature(settings, payload_factory, encode_payload) -> None:
     event_queue: queue.Queue = queue.Queue()
@@ -81,7 +84,7 @@ def test_webhook_returns_401_on_invalid_signature(settings, payload_factory, enc
     assert response.status_code == 401
 
 
-def test_webhook_ignores_non_issue_comment_event(
+def test_webhook_ignores_unsupported_issues_action(
     settings,
     payload_factory,
     encode_payload,
@@ -111,7 +114,85 @@ def test_webhook_ignores_non_issue_comment_event(
     response = client.post("/webhook/github", content=raw_body, headers=headers)
 
     assert response.status_code == 202
+    assert response.json() == {"result": "ignored_filter", "reason": "action_not_supported"}
     assert event_queue.qsize() == 0
+
+
+def test_webhook_accepts_issues_closed_and_enqueues_job(
+    settings,
+    payload_factory,
+    encode_payload,
+    signed_headers_factory,
+    test_secret,
+) -> None:
+    event_queue: queue.Queue = queue.Queue()
+    github = FakeGithubClient()
+    store = SqliteDeliveryStore(settings.sqlite_path)
+
+    app = create_app(
+        settings=settings,
+        store=store,
+        event_queue=event_queue,
+        github_client=github,
+        tmux_runner=DummyTmuxRunner(),
+    )
+    client = TestClient(app)
+
+    payload = payload_factory(action="closed")
+    raw_body = encode_payload(payload)
+    headers = signed_headers_factory(
+        secret=test_secret,
+        raw_body=raw_body,
+        delivery_id="delivery-issues-closed",
+        event_name="issues",
+    )
+
+    response = client.post("/webhook/github", content=raw_body, headers=headers)
+
+    assert response.status_code == 202
+    assert event_queue.qsize() == 1
+    assert github.reactions == []
+
+
+def test_webhook_accepts_issues_reopened_and_enqueues_job(
+    settings,
+    payload_factory,
+    encode_payload,
+    signed_headers_factory,
+    test_secret,
+) -> None:
+    event_queue: queue.Queue = queue.Queue()
+    github = FakeGithubClient()
+    store = SqliteDeliveryStore(settings.sqlite_path)
+
+    app = create_app(
+        settings=settings,
+        store=store,
+        event_queue=event_queue,
+        github_client=github,
+        tmux_runner=DummyTmuxRunner(),
+    )
+    client = TestClient(app)
+
+    payload = payload_factory(action="reopened")
+    raw_body = encode_payload(payload)
+    headers = signed_headers_factory(
+        secret=test_secret,
+        raw_body=raw_body,
+        delivery_id="delivery-issues-reopened",
+        event_name="issues",
+    )
+
+    response = client.post("/webhook/github", content=raw_body, headers=headers)
+
+    assert response.status_code == 202
+    assert event_queue.qsize() == 1
+    job = event_queue.get_nowait()
+    assert job.event_name == "issues"
+    assert job.payload["repository"]["full_name"] == "namjookim/claude-kanban"
+    assert job.payload["issue"]["number"] == 1
+    assert job.payload["action"] == "reopened"
+    assert github.reactions == []
 
 
 def test_webhook_ignores_filtered_payload(

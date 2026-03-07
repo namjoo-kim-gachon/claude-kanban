@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import queue
+import re
+from datetime import datetime, timezone
 from typing import Any
 
 from app.infra.sqlite_store import SqliteDeliveryStore
@@ -76,21 +78,31 @@ class FakeTmuxRunner:
     def __init__(self, *, should_fail: bool = False) -> None:
         self.should_fail = should_fail
         self.payloads: list[str] = []
+        self.rename_payloads: list[str] = []
+        self.wait_calls: list[tuple[str, str, float]] = []
+        self.calls: list[tuple[str, str]] = []
 
     def run_payload(self, *, target: str, payload: str) -> None:
-        _ = target
+        self.calls.append((target, payload))
         if self.should_fail:
             raise RuntimeError("tmux failed")
+        if payload.startswith("/rename "):
+            self.rename_payloads.append(payload)
+            return
         self.payloads.append(payload)
 
+    def wait_for_text(self, *, target: str, expected_text: str, timeout_seconds: float = 8.0) -> None:
+        self.wait_calls.append((target, expected_text, timeout_seconds))
 
-def _job(delivery_id: str, comment_id: int, comment_body: str) -> WorkerJob:
+
+def _job(delivery_id: str, comment_id: int, comment_body: str, *, event_name: str = "issue_comment", action: str = "created") -> WorkerJob:
     payload = {
+        "action": action,
         "repository": {"full_name": "namjookim/claude-kanban"},
         "issue": {"number": 7, "title": "Issue title", "body": "Issue body", "user": {"login": "namjoo-kim-gachon"}},
         "comment": {"id": comment_id, "body": comment_body},
     }
-    return WorkerJob(delivery_id=delivery_id, payload=payload)
+    return WorkerJob(delivery_id=delivery_id, event_name=event_name, payload=payload)
 
 
 def _decode_tmux_payload(payload_text: str) -> tuple[str, dict[str, Any]]:
@@ -149,7 +161,8 @@ def test_worker_sends_first_comment_payload_with_issue_context(settings) -> None
     assert payload["issue_title"] == "Issue title"
     assert payload["issue_body"] == "Issue body"
     assert payload["project_transition"]["next_target_status"] == "Review"
-    assert instruction.startswith("/claude-kanban")
+    instruction_lines = instruction.splitlines()
+    assert instruction_lines[0] == "/claude-kanban"
 
 
 def test_worker_sends_followup_comment_payload_without_issue_context(settings) -> None:
@@ -197,7 +210,8 @@ def test_worker_normalizes_instruction_and_removes_mentions(settings) -> None:
     worker.process_next_once()
 
     instruction, _ = _decode_tmux_payload(tmux.payloads[0])
-    assert instruction.startswith("/claude-kanban")
+    instruction_lines = instruction.splitlines()
+    assert instruction_lines[0] == "/claude-kanban"
     assert "@claude" not in instruction.lower()
 
 
@@ -429,6 +443,9 @@ def test_worker_routes_by_mention_mapping(settings) -> None:
         def run_payload(self, *, target: str, payload: str) -> None:
             self.calls.append((target, payload))
 
+        def wait_for_text(self, *, target: str, expected_text: str, timeout_seconds: float = 8.0) -> None:
+            _ = (target, expected_text, timeout_seconds)
+
     tmux = CaptureTmuxRunner()
 
     mapped_settings = type(settings)(
@@ -450,9 +467,10 @@ def test_worker_routes_by_mention_mapping(settings) -> None:
     event_queue.put(_job("d-map-mention", 940, "@ㅋㅋ 이 기능 추가해줘"))
     worker.process_next_once()
 
-    assert len(tmux.calls) == 1
+    assert len(tmux.calls) == 2
     assert tmux.calls[0][0] == "0:0.0"
-    instruction, _ = _decode_tmux_payload(tmux.calls[0][1])
+    assert tmux.calls[0][1].startswith("/rename ")
+    instruction, _ = _decode_tmux_payload(tmux.calls[1][1])
     assert "@ㅋㅋ" not in instruction
 
 
@@ -550,6 +568,209 @@ def test_tmux_runner_raises_meaningful_error_on_preflight_failure(monkeypatch) -
         assert False, "expected RuntimeError"
     except RuntimeError as exc:
         assert "tmux preflight failed" in str(exc)
+
+
+def test_worker_runs_clear_command_on_issue_closed(settings) -> None:
+    event_queue: queue.Queue[WorkerJob] = queue.Queue()
+    github = FakeGithubClient(mention_comments=[])
+    tmux = FakeTmuxRunner()
+
+    worker = QueueWorker(
+        settings=settings,
+        event_queue=event_queue,
+        store=None,
+        github_client=github,
+        tmux_runner=tmux,
+    )
+
+    event_queue.put(_job("d-issue-closed", 0, "", event_name="issues", action="closed"))
+    worker.process_next_once()
+
+    assert tmux.calls == [("claude:0.0", "/clear")]
+
+
+def test_worker_runs_resume_command_on_issue_reopened(settings) -> None:
+    event_queue: queue.Queue[WorkerJob] = queue.Queue()
+    github = FakeGithubClient(mention_comments=[])
+    tmux = FakeTmuxRunner()
+
+    worker = QueueWorker(
+        settings=settings,
+        event_queue=event_queue,
+        store=None,
+        github_client=github,
+        tmux_runner=tmux,
+    )
+
+    event_queue.put(_job("d-issue-reopen", 0, "", event_name="issues", action="reopened"))
+    worker.process_next_once()
+
+    assert tmux.calls == [("claude:0.0", "/resume")]
+
+
+def test_worker_adds_rename_with_session_name_pattern(settings) -> None:
+    event_queue: queue.Queue[WorkerJob] = queue.Queue()
+    github = FakeGithubClient(mention_comments=[{"id": 1001, "body": "@claude run"}])
+    tmux = FakeTmuxRunner()
+
+    worker = QueueWorker(
+        settings=settings,
+        event_queue=event_queue,
+        store=None,
+        github_client=github,
+        tmux_runner=tmux,
+    )
+
+    event_queue.put(
+        WorkerJob(
+            delivery_id="d-rename-pattern",
+            event_name="issue_comment",
+            payload={
+                "action": "created",
+                "repository": {"full_name": "namjookim/claude-kanban"},
+                "issue": {
+                    "number": 42,
+                    "title": "Fix OAuth 로그인!! NOW",
+                    "body": "Issue body",
+                    "user": {"login": "namjoo-kim-gachon"},
+                },
+                "comment": {"id": 1001, "body": "@claude run"},
+            },
+        )
+    )
+    worker.process_next_once()
+
+    rename_line = tmux.rename_payloads[0]
+    assert rename_line.startswith("/rename ")
+
+    session_name = rename_line.removeprefix("/rename ")
+    assert re.fullmatch(r"[a-z0-9-]+-\d{8}T\d{6}Z", session_name)
+    assert session_name.startswith("fix-oauth-now-")
+
+    timestamp_text = session_name.rsplit("-", 1)[1]
+    parsed = datetime.strptime(timestamp_text, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+    assert parsed.tzinfo == timezone.utc
+
+
+def test_worker_updates_issue_session_to_latest_on_repeated_comments(settings) -> None:
+    event_queue: queue.Queue[WorkerJob] = queue.Queue()
+    store = SqliteDeliveryStore(settings.sqlite_path)
+    github = FakeGithubClient(
+        mention_comments=[
+            {"id": 100, "body": "@claude first"},
+            {"id": 200, "body": "@claude second"},
+        ]
+    )
+    tmux = FakeTmuxRunner()
+
+    worker = QueueWorker(
+        settings=settings,
+        event_queue=event_queue,
+        store=store,
+        github_client=github,
+        tmux_runner=tmux,
+    )
+
+    event_queue.put(_job("d-session-1", 100, "@claude first"))
+    worker.process_next_once()
+    first_session = tmux.rename_payloads[0].removeprefix("/rename ")
+
+    event_queue.put(_job("d-session-2", 200, "@claude second"))
+    worker.process_next_once()
+    second_session = tmux.rename_payloads[1].removeprefix("/rename ")
+
+    latest = store.get_issue_session_name(
+        repo_full_name="namjookim/claude-kanban",
+        issue_number=7,
+    )
+
+    assert first_session != ""
+    assert second_session != ""
+    assert latest == second_session
+
+
+def test_worker_runs_resume_with_latest_session_name_on_issue_reopened(settings) -> None:
+    event_queue: queue.Queue[WorkerJob] = queue.Queue()
+    github = FakeGithubClient(mention_comments=[])
+    tmux = FakeTmuxRunner()
+    store = SqliteDeliveryStore(settings.sqlite_path)
+
+    store.upsert_issue_session(
+        repo_full_name="namjookim/claude-kanban",
+        issue_number=7,
+        session_name="issue-title-20260307T010203Z",
+    )
+
+    worker = QueueWorker(
+        settings=settings,
+        event_queue=event_queue,
+        store=store,
+        github_client=github,
+        tmux_runner=tmux,
+    )
+
+    event_queue.put(_job("d-issue-reopen-with-session", 0, "", event_name="issues", action="reopened"))
+    worker.process_next_once()
+
+    assert tmux.calls == [("claude:0.0", "/resume issue-title-20260307T010203Z")]
+
+
+def test_worker_falls_back_to_plain_resume_when_no_saved_session(settings) -> None:
+    event_queue: queue.Queue[WorkerJob] = queue.Queue()
+    github = FakeGithubClient(mention_comments=[])
+    tmux = FakeTmuxRunner()
+    store = SqliteDeliveryStore(settings.sqlite_path)
+
+    worker = QueueWorker(
+        settings=settings,
+        event_queue=event_queue,
+        store=store,
+        github_client=github,
+        tmux_runner=tmux,
+    )
+
+    event_queue.put(_job("d-issue-reopen-no-session", 0, "", event_name="issues", action="reopened"))
+    worker.process_next_once()
+
+    assert tmux.calls == [("claude:0.0", "/resume")]
+
+
+def test_worker_fails_issue_state_when_mapping_missing(settings) -> None:
+    event_queue: queue.Queue[WorkerJob] = queue.Queue()
+    github = FakeGithubClient(mention_comments=[])
+    tmux = FakeTmuxRunner()
+    store = SqliteDeliveryStore(settings.sqlite_path)
+
+    store.insert_delivery_if_new(
+        delivery_id="d-issue-no-target",
+        event="issues",
+        repo_full_name="namjookim/claude-kanban",
+        comment_id=None,
+        status="accepted",
+    )
+
+    no_mapping_settings = type(settings)(
+        github_webhook_secret=settings.github_webhook_secret,
+        github_pat=settings.github_pat,
+        mention_to_tmux={},
+        sqlite_path=settings.sqlite_path,
+        log_level=settings.log_level,
+    )
+
+    worker = QueueWorker(
+        settings=no_mapping_settings,
+        event_queue=event_queue,
+        store=store,
+        github_client=github,
+        tmux_runner=tmux,
+    )
+
+    event_queue.put(_job("d-issue-no-target", 0, "", event_name="issues", action="closed"))
+    worker.process_next_once()
+
+    row = store.get_delivery("d-issue-no-target")
+    assert row is not None
+    assert row["status"] == "failed"
 
 
 def test_tmux_runner_raises_meaningful_error_on_paste_failure(monkeypatch) -> None:

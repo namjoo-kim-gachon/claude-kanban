@@ -58,6 +58,12 @@ class Settings:
                 return target
         return ""
 
+    def default_tmux_target(self) -> str:
+        mentions = sorted((self.mention_to_tmux or {}).items(), key=lambda item: len(item[0]), reverse=True)
+        if not mentions:
+            return ""
+        return mentions[0][1]
+
     @classmethod
     def from_env(cls) -> "Settings":
         mention_to_tmux = _parse_mention_target_map(os.getenv("MENTION_TO_TMUX", ""))

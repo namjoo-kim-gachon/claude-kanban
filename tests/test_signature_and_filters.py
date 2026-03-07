@@ -6,6 +6,7 @@ from app.config import _parse_mention_target_map
 from app.domain.webhook_rules import (
     ACCEPTED_ASSOCIATIONS,
     is_allowed_issue_comment,
+    is_allowed_issue_state_event,
     should_handle_event,
     verify_github_signature,
 )
@@ -17,8 +18,12 @@ def test_verify_github_signature_rejects_invalid_signature(test_secret, encode_p
     assert verify_github_signature(raw_body=raw_body, secret=test_secret, signature_header="sha256=invalid") is False
 
 
-def test_should_handle_event_rejects_non_issue_comment() -> None:
-    assert should_handle_event(event_name="issues") is False
+def test_should_handle_event_accepts_issues() -> None:
+    assert should_handle_event(event_name="issues") is True
+
+
+def test_should_handle_event_rejects_unrelated_event() -> None:
+    assert should_handle_event(event_name="pull_request") is False
 
 
 def test_filter_rejects_non_created_action(payload_factory) -> None:
@@ -99,6 +104,33 @@ def test_parse_mention_target_map_warns_invalid_entries() -> None:
         parsed = _parse_mention_target_map("@claude=0:0.0,invalid,@ops=0:0.1,=bad,@x=")
 
     assert parsed == {"@claude": "0:0.0", "@ops": "0:0.1"}
+
+
+def test_issue_state_filter_accepts_closed_action(payload_factory) -> None:
+    payload = payload_factory(action="closed")
+
+    decision = is_allowed_issue_state_event(payload=payload)
+
+    assert decision.allowed is True
+    assert decision.reason == "accepted"
+
+
+def test_issue_state_filter_accepts_reopened_action(payload_factory) -> None:
+    payload = payload_factory(action="reopened")
+
+    decision = is_allowed_issue_state_event(payload=payload)
+
+    assert decision.allowed is True
+    assert decision.reason == "accepted"
+
+
+def test_issue_state_filter_rejects_unsupported_action(payload_factory) -> None:
+    payload = payload_factory(action="edited")
+
+    decision = is_allowed_issue_state_event(payload=payload)
+
+    assert decision.allowed is False
+    assert decision.reason == "action_not_supported"
 
 
 def test_accepted_associations_are_fixed_set() -> None:

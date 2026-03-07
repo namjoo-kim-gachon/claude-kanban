@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import UTC, datetime
+from datetime import datetime, timezone
+
+import pytest
 
 from app.infra.sqlite_store import SqliteDeliveryStore
 
 
 def _now_iso() -> str:
-    return datetime.now(UTC).isoformat()
+    return datetime.now(timezone.utc).isoformat()
 
 
 def test_insert_delivery_accepts_first_event(settings) -> None:
@@ -108,3 +110,87 @@ def test_received_at_is_stored(settings) -> None:
     row = store.get_delivery(delivery_id)
     assert row is not None
     assert row["received_at"]
+
+
+def test_issue_sessions_table_exists(settings) -> None:
+    SqliteDeliveryStore(settings.sqlite_path)
+
+    with sqlite3.connect(settings.sqlite_path) as conn:
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='issue_sessions'"
+        ).fetchone()
+
+    assert row is not None
+
+
+def test_issue_session_upsert_and_get(settings) -> None:
+    store = SqliteDeliveryStore(settings.sqlite_path)
+
+    store.upsert_issue_session(
+        repo_full_name="namjookim/claude-kanban",
+        issue_number=7,
+        session_name="issue-title-20260307T000001Z",
+    )
+
+    session_name = store.get_issue_session_name(
+        repo_full_name="namjookim/claude-kanban",
+        issue_number=7,
+    )
+
+    assert session_name == "issue-title-20260307T000001Z"
+
+
+def test_issue_session_upsert_updates_latest_name_and_timestamp(settings) -> None:
+    store = SqliteDeliveryStore(settings.sqlite_path)
+
+    store.upsert_issue_session(
+        repo_full_name="namjookim/claude-kanban",
+        issue_number=7,
+        session_name="issue-title-20260307T000001Z",
+    )
+    with sqlite3.connect(settings.sqlite_path) as conn:
+        first_created_at, first_updated_at = conn.execute(
+            """
+            SELECT created_at, updated_at
+            FROM issue_sessions
+            WHERE repo_full_name = ? AND issue_number = ?
+            """,
+            ("namjookim/claude-kanban", 7),
+        ).fetchone()
+
+    store.upsert_issue_session(
+        repo_full_name="namjookim/claude-kanban",
+        issue_number=7,
+        session_name="issue-title-20260307T000002Z",
+    )
+
+    with sqlite3.connect(settings.sqlite_path) as conn:
+        second_session_name, second_created_at, second_updated_at = conn.execute(
+            """
+            SELECT session_name, created_at, updated_at
+            FROM issue_sessions
+            WHERE repo_full_name = ? AND issue_number = ?
+            """,
+            ("namjookim/claude-kanban", 7),
+        ).fetchone()
+
+    assert second_session_name == "issue-title-20260307T000002Z"
+    assert second_created_at == first_created_at
+    assert second_updated_at >= first_updated_at
+
+
+def test_issue_session_name_must_be_unique(settings) -> None:
+    store = SqliteDeliveryStore(settings.sqlite_path)
+
+    store.upsert_issue_session(
+        repo_full_name="namjookim/claude-kanban",
+        issue_number=7,
+        session_name="same-session-name-20260307T000003Z",
+    )
+
+    with pytest.raises(sqlite3.IntegrityError):
+        store.upsert_issue_session(
+            repo_full_name="namjookim/another-repo",
+            issue_number=8,
+            session_name="same-session-name-20260307T000003Z",
+        )

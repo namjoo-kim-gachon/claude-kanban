@@ -28,7 +28,7 @@ def verify_github_signature(*, raw_body: bytes, secret: str, signature_header: s
 
 
 def should_handle_event(*, event_name: str | None) -> bool:
-    return event_name == "issue_comment"
+    return event_name in {"issue_comment", "issues"}
 
 
 def is_allowed_issue_comment(*, payload: dict[str, Any], mention_keywords: list[str]) -> FilterDecision:
@@ -51,3 +51,15 @@ def is_allowed_issue_comment(*, payload: dict[str, Any], mention_keywords: list[
         return FilterDecision(allowed=False, reason="comment_id_invalid")
 
     return FilterDecision(allowed=True, reason="accepted", comment_id=comment_id)
+
+
+def is_allowed_issue_state_event(*, payload: dict[str, Any]) -> FilterDecision:
+    action = payload.get("action")
+    if action not in {"closed", "reopened"}:
+        return FilterDecision(allowed=False, reason="action_not_supported")
+
+    issue = payload.get("issue")
+    if not isinstance(issue, dict):
+        return FilterDecision(allowed=False, reason="issue_missing")
+
+    return FilterDecision(allowed=True, reason="accepted")

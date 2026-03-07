@@ -148,32 +148,55 @@ Run only when all IDs exist:
 - `STATUS_FIELD_ID`
 - `REVIEW_OPTION_ID` (= `next_target_option_id`)
 
+**GraphQL 파싱 안정성 규칙 (중요):**
+- `mutation($projectId:...)`의 `$...`는 셸 변수 확장을 절대 타면 안 됩니다.
+- GraphQL 본문은 반드시 **single-quoted HEREDOC**(`<<'GRAPHQL'`)로 만들고, `--raw-field query="$GRAPHQL_QUERY"`로 전달합니다.
+- 금지: `-f query="mutation($projectId...)"` 형태(더블쿼트 사용 시 `$projectId`가 비어 `VAR_SIGN` 파싱 오류 재발 가능).
+- `set -u` 환경에서도 동작하도록, 실행 전 필수 변수 존재를 명시적으로 검증합니다.
+
 ```bash
-gh api graphql \
-  -f query="$(cat <<'EOF'
-mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
-  updateProjectV2ItemFieldValue(
-    input: {
-      projectId: $projectId
-      itemId: $itemId
-      fieldId: $fieldId
-      value: { singleSelectOptionId: $optionId }
-    }
-  ) {
+# preflight (set -u 안전)
+: "${PROJECT_ID:?missing PROJECT_ID}"
+: "${PROJECT_ITEM_ID:?missing PROJECT_ITEM_ID}"
+: "${STATUS_FIELD_ID:?missing STATUS_FIELD_ID}"
+: "${REVIEW_OPTION_ID:?missing REVIEW_OPTION_ID}"
+
+GRAPHQL_QUERY="$(cat <<'GRAPHQL'
+mutation($projectId:ID!,$itemId:ID!,$fieldId:ID!,$optionId:String!){
+  updateProjectV2ItemFieldValue(input:{
+    projectId:$projectId,
+    itemId:$itemId,
+    fieldId:$fieldId,
+    value:{singleSelectOptionId:$optionId}
+  }) {
     projectV2Item { id }
   }
 }
-EOF
-)" \
-  -f projectId="$PROJECT_ID" \
-  -f itemId="$PROJECT_ITEM_ID" \
-  -f fieldId="$STATUS_FIELD_ID" \
-  -f optionId="$REVIEW_OPTION_ID"
+GRAPHQL
+)"
+
+TRANSITION_OUTPUT="$(gh api graphql \
+  --raw-field query="$GRAPHQL_QUERY" \
+  --raw-field projectId="$PROJECT_ID" \
+  --raw-field itemId="$PROJECT_ITEM_ID" \
+  --raw-field fieldId="$STATUS_FIELD_ID" \
+  --raw-field optionId="$REVIEW_OPTION_ID" \
+  2>&1)"
+TRANSITION_EXIT_CODE=$?
+
+if [ $TRANSITION_EXIT_CODE -ne 0 ]; then
+  # 실패 시에도 후속 액션(이슈 코멘트)은 계속 진행
+  # final summary/comment에 아래 3가지를 반드시 포함:
+  # 1) 실패 원문($TRANSITION_OUTPUT)
+  # 2) 실행 명령(민감정보 제외)
+  # 3) query 전달 방식: --raw-field query + single-quoted HEREDOC
+  :
+fi
 ```
 
-GraphQL mutation은 **반드시 HEREDOC**으로 전달한다. 인라인 쿼리 문자열(`-f query='mutation(...)'`)은 셸/이스케이프 환경에 따라 `Expected VAR_SIGN` 같은 파싱 오류가 반복될 수 있으므로 사용하지 않는다.
-
 If this step fails, do not rollback instruction work. Report failure in final summary and in the issue comment.
+- `VAR_SIGN` 또는 GraphQL parse error가 발생하면, 최종 요약/이슈 코멘트에 **실행한 명령과 쿼리 전달 방식**을 함께 남깁니다.
+- `review_transition_result`에는 성공 시 `projectV2Item.id`, 실패 시 `failed: <핵심 오류>` 형태로 남깁니다.
 
 If instruction execution fails, comment body must include:
 - `@issue_author_login` mention

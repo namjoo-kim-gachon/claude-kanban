@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import json
 import queue
 import re
 import threading
 from typing import Any, Protocol
+import unicodedata
 
 from app.config import Settings
 from app.infra.sqlite_store import SqliteDeliveryStore
@@ -14,6 +16,7 @@ from app.infra.sqlite_store import SqliteDeliveryStore
 @dataclass(frozen=True)
 class WorkerJob:
     delivery_id: str
+    event_name: str
     payload: dict[str, Any]
 
 
@@ -36,6 +39,8 @@ class GithubClientProtocol(Protocol):
 
 class TmuxRunnerProtocol(Protocol):
     def run_payload(self, *, target: str, payload: str) -> None: ...
+
+    def wait_for_text(self, *, target: str, expected_text: str, timeout_seconds: float = 8.0) -> None: ...
 
 
 class QueueWorker:
@@ -83,6 +88,19 @@ class QueueWorker:
             "next_target_status": "Review",
             "next_target_option_id": None,
         }
+
+    def _build_issue_session_name(self, *, issue_title: str, issue_number: int) -> str:
+        normalized = unicodedata.normalize("NFKD", issue_title)
+        ascii_only = normalized.encode("ascii", "ignore").decode("ascii").lower()
+        slug = re.sub(r"[^a-z0-9]+", "-", ascii_only)
+        slug = re.sub(r"-+", "-", slug).strip("-")
+        if not slug:
+            slug = f"issue-{issue_number}"
+        slug = slug[:48].rstrip("-")
+        if not slug:
+            slug = f"issue-{issue_number}"
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        return f"{slug}-{timestamp}"
 
     def _build_payload(
         self,
@@ -148,7 +166,7 @@ class QueueWorker:
         self._process_job(job)
         return True
 
-    def _process_job(self, job: WorkerJob) -> None:
+    def _process_issue_comment_job(self, job: WorkerJob) -> None:
         payload = job.payload
         repo_full_name = payload["repository"]["full_name"]
         issue_number = payload["issue"]["number"]
@@ -158,61 +176,114 @@ class QueueWorker:
         comment_id = payload["comment"]["id"]
         comment_body = payload["comment"]["body"]
 
+        is_first = self._is_first_mention(
+            repo_full_name=repo_full_name,
+            issue_number=issue_number,
+            current_comment_id=comment_id,
+        )
+
+        project_transition = self._default_project_transition()
         try:
-            is_first = self._is_first_mention(
+            project_transition = self.github_client.prepare_project_transition(
                 repo_full_name=repo_full_name,
                 issue_number=issue_number,
-                current_comment_id=comment_id,
             )
-
+            project_transition["attempted"] = True
+        except Exception as exc:
             project_transition = self._default_project_transition()
-            try:
-                project_transition = self.github_client.prepare_project_transition(
-                    repo_full_name=repo_full_name,
-                    issue_number=issue_number,
-                )
-                project_transition["attempted"] = True
-            except Exception as exc:
-                project_transition = self._default_project_transition()
-                project_transition["attempted"] = True
-                project_transition["in_progress"]["reason"] = f"client_error:{type(exc).__name__}"
+            project_transition["attempted"] = True
+            project_transition["in_progress"]["reason"] = f"client_error:{type(exc).__name__}"
 
-            resolved_tmux_target = self.settings.resolve_tmux_target(comment_body)
-            if not resolved_tmux_target:
-                raise RuntimeError("MENTION_TO_TMUX mapping is required")
+        resolved_tmux_target = self.settings.resolve_tmux_target(comment_body)
+        if not resolved_tmux_target:
+            raise RuntimeError("MENTION_TO_TMUX mapping is required")
 
-            in_progress = project_transition.get("in_progress")
-            if isinstance(in_progress, dict):
-                project_id = in_progress.get("project_id")
-                project_item_id = in_progress.get("project_item_id")
-                status_field_id = in_progress.get("status_field_id")
-                in_progress_option_id = in_progress.get("in_progress_option_id")
+        in_progress = project_transition.get("in_progress")
+        if isinstance(in_progress, dict):
+            project_id = in_progress.get("project_id")
+            project_item_id = in_progress.get("project_item_id")
+            status_field_id = in_progress.get("status_field_id")
+            in_progress_option_id = in_progress.get("in_progress_option_id")
 
-                if project_id and project_item_id and status_field_id and in_progress_option_id:
-                    try:
-                        self.github_client.try_move_issue_to_in_progress(
-                            project_id=str(project_id),
-                            project_item_id=str(project_item_id),
-                            status_field_id=str(status_field_id),
-                            in_progress_option_id=str(in_progress_option_id),
-                        )
-                    except Exception:
-                        pass
+            if project_id and project_item_id and status_field_id and in_progress_option_id:
+                try:
+                    self.github_client.try_move_issue_to_in_progress(
+                        project_id=str(project_id),
+                        project_item_id=str(project_item_id),
+                        status_field_id=str(status_field_id),
+                        in_progress_option_id=str(in_progress_option_id),
+                    )
+                except Exception:
+                    pass
 
-            instruction = self._normalize_instruction(comment_body)
-            tmux_payload_json = self._build_payload(
-                delivery_id=job.delivery_id,
-                issue_title=issue_title,
-                issue_body=issue_body,
-                issue_author_login=issue_author_login,
-                is_first_mention=is_first,
+        instruction = self._normalize_instruction(comment_body)
+        session_name = self._build_issue_session_name(issue_title=issue_title, issue_number=issue_number)
+
+        tmux_payload_json = self._build_payload(
+            delivery_id=job.delivery_id,
+            issue_title=issue_title,
+            issue_body=issue_body,
+            issue_author_login=issue_author_login,
+            is_first_mention=is_first,
+            repo_full_name=repo_full_name,
+            issue_number=issue_number,
+            comment_id=comment_id,
+            project_transition=project_transition,
+        )
+
+        self.tmux_runner.run_payload(target=resolved_tmux_target, payload=f"/rename {session_name}")
+        self.tmux_runner.wait_for_text(
+            target=resolved_tmux_target,
+            expected_text=f"Session and agent renamed to: {session_name}",
+        )
+
+        tmux_payload = f"{instruction}\n\n{tmux_payload_json}"
+        self.tmux_runner.run_payload(target=resolved_tmux_target, payload=tmux_payload)
+        if self.store is not None:
+            self.store.upsert_issue_session(
                 repo_full_name=repo_full_name,
                 issue_number=issue_number,
-                comment_id=comment_id,
-                project_transition=project_transition,
+                session_name=session_name,
             )
-            tmux_payload = f"{instruction}\n\n{tmux_payload_json}"
-            self.tmux_runner.run_payload(target=resolved_tmux_target, payload=tmux_payload)
+
+    def _process_issue_state_job(self, job: WorkerJob) -> None:
+        payload = job.payload
+        action = str(payload.get("action") or "")
+
+        resolved_tmux_target = self.settings.default_tmux_target()
+        if not resolved_tmux_target:
+            raise RuntimeError("MENTION_TO_TMUX mapping is required")
+
+        if action == "closed":
+            self.tmux_runner.run_payload(target=resolved_tmux_target, payload="/clear")
+            return
+
+        if action == "reopened":
+            payload_text = "/resume"
+            try:
+                repo_full_name = payload["repository"]["full_name"]
+                issue_number = int(payload["issue"]["number"])
+                if self.store is not None:
+                    session_name = self.store.get_issue_session_name(
+                        repo_full_name=repo_full_name,
+                        issue_number=issue_number,
+                    )
+                    if session_name:
+                        payload_text = f"/resume {session_name}"
+            except Exception:
+                payload_text = "/resume"
+
+            self.tmux_runner.run_payload(target=resolved_tmux_target, payload=payload_text)
+            return
+
+        raise RuntimeError(f"unsupported_issue_action:{action}")
+
+    def _process_job(self, job: WorkerJob) -> None:
+        try:
+            if job.event_name == "issues":
+                self._process_issue_state_job(job)
+            else:
+                self._process_issue_comment_job(job)
 
             if self.store is not None:
                 self.store.update_status(delivery_id=job.delivery_id, status="processed")
